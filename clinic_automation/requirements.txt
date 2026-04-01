@@ -1,0 +1,30 @@
+# Google API
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.1.0
+google-auth-oauthlib>=1.1.0
+
+# Notion API
+notion-client>=2.2.0
+
+# WhatsApp (Twilio)
+twilio>=8.10.0
+
+# Ses İşleme ve Transkripsiyon
+openai>=1.12.0
+pydub>=0.25.1
+faster-whisper>=1.0.0
+
+# LLM
+anthropic>=0.39.0
+
+# Güvenlik
+cryptography>=41.0.0
+
+# Yardımcı
+python-dotenv>=1.0.0
+requests>=2.31.0
+python-dateutil>=2.8.2
+pytz>=2023.3
+rich>=13.7.0
+click>=8.1.0
+tqdm>=4.66.0

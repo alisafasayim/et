@@ -1,0 +1,34 @@
+# Güvenlik - hassas dosyalar
+.env
+*.enc
+.encryption_key
+token.json
+credentials.json
+audit.log
+
+# Ses dosyaları (büyük ve hassas)
+audio_files/
+*.m4a
+*.mp3
+*.wav
+*.ogg
+*.flac
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
