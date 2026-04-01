@@ -15,3 +15,5 @@ requests>=2.32.0
 
 # Modül 3 - WhatsApp İletişimi
 flask>=3.0.3
+
+# Modül 4 - e-SMM (requests zaten yukarıda mevcut)
