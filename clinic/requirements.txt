@@ -12,3 +12,6 @@ google-auth-oauthlib>=1.2.0
 # Modül 2 - Notion Arşivleme
 notion-client>=2.2.1
 requests>=2.32.0
+
+# Modül 3 - WhatsApp İletişimi
+flask>=3.0.3
