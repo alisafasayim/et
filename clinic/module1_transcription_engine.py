@@ -1,0 +1,479 @@
+"""
+Modül 1: Akıllı Transkripsiyon ve Hasta Eşleştirme Motoru
+
+Kurulum:
+    pip install tinytag faster-whisper pyannote.audio ollama \
+                google-api-python-client google-auth-httplib2 \
+                google-auth-oauthlib
+
+PyAnnote için HuggingFace token gereklidir:
+    export HF_TOKEN="hf_..."
+"""
+
+import json
+import os
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import ollama
+from faster_whisper import WhisperModel
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from pyannote.audio import Pipeline
+from tinytag import TinyTag
+
+# ---------------------------------------------------------------------------
+# Sabitler
+# ---------------------------------------------------------------------------
+
+AUDIO_INBOX_DIR = Path(os.getenv("AUDIO_INBOX_DIR", "./audio_inbox"))
+GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+GOOGLE_TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
+GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "large-v3")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+
+CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+
+# Randevu eşleştirmesi için tolerans (dakika)
+APPOINTMENT_MATCH_WINDOW_MINUTES = 30
+
+# ---------------------------------------------------------------------------
+# 1. Metadata Çekimi
+# ---------------------------------------------------------------------------
+
+def get_audio_metadata(file_path: Path) -> dict:
+    """tinytag ile ses dosyasından tarih/saat ve temel metadata okur."""
+    tag = TinyTag.get(str(file_path))
+    stat = file_path.stat()
+
+    # TinyTag bazı formatlarda kayıt tarihini veremeyebilir; fallback: dosya mtime
+    recorded_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+
+    return {
+        "file_path": str(file_path),
+        "file_name": file_path.name,
+        "duration_seconds": tag.duration,
+        "recorded_at": recorded_at.isoformat(),
+        "recorded_at_dt": recorded_at,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 2. Google Calendar Bağlantısı ve Randevu Çekimi
+# ---------------------------------------------------------------------------
+
+def get_calendar_service():
+    """OAuth2 akışıyla Google Calendar API servisini döner."""
+    creds = None
+    if Path(GOOGLE_TOKEN_FILE).exists():
+        creds = Credentials.from_authorized_user_file(GOOGLE_TOKEN_FILE, CALENDAR_SCOPES)
+
+    if not creds or not creds.valid:
+        flow = InstalledAppFlow.from_client_secrets_file(
+            GOOGLE_CREDENTIALS_FILE, CALENDAR_SCOPES
+        )
+        creds = flow.run_local_server(port=0)
+        Path(GOOGLE_TOKEN_FILE).write_text(creds.to_json())
+
+    return build("calendar", "v3", credentials=creds)
+
+
+def fetch_day_appointments(service, target_date: datetime) -> list[dict]:
+    """Verilen güne ait tüm takvim randevularını çeker."""
+    day_start = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+
+    events_result = (
+        service.events()
+        .list(
+            calendarId=GOOGLE_CALENDAR_ID,
+            timeMin=day_start.astimezone(timezone.utc).isoformat(),
+            timeMax=day_end.astimezone(timezone.utc).isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
+
+    appointments = []
+    for event in events_result.get("items", []):
+        start_str = event["start"].get("dateTime", event["start"].get("date"))
+        end_str = event["end"].get("dateTime", event["end"].get("date"))
+        appointments.append(
+            {
+                "event_id": event["id"],
+                "summary": event.get("summary", ""),
+                "description": event.get("description", ""),
+                "start": start_str,
+                "end": end_str,
+                "start_dt": datetime.fromisoformat(start_str),
+            }
+        )
+    return appointments
+
+
+def match_appointments(recorded_at: datetime, appointments: list[dict]) -> list[dict]:
+    """
+    Ses kaydının saatine yakın (±APPOINTMENT_MATCH_WINDOW_MINUTES) randevuları döner.
+    Ses kaydı birden fazla randevuyu kapsayabilir; tamamını listele.
+    """
+    window = timedelta(minutes=APPOINTMENT_MATCH_WINDOW_MINUTES)
+    matched = []
+    for appt in appointments:
+        appt_start = appt["start_dt"]
+        if not appt_start.tzinfo:
+            appt_start = appt_start.replace(tzinfo=timezone.utc)
+        if abs(recorded_at - appt_start) <= window:
+            matched.append(appt)
+    return matched
+
+
+# ---------------------------------------------------------------------------
+# 3. Transkripsiyon (faster-whisper) ve Diarization (pyannote)
+# ---------------------------------------------------------------------------
+
+def transcribe_audio(file_path: Path) -> list[dict]:
+    """
+    faster-whisper ile transkripsiyon yapar.
+    Her segment için başlangıç/bitiş süresi ve metni döner.
+    """
+    model = WhisperModel(WHISPER_MODEL_SIZE, device="auto", compute_type="auto")
+    segments, info = model.transcribe(str(file_path), beam_size=5, language="tr")
+
+    print(f"[Whisper] Dil: {info.language}, Olasılık: {info.language_probability:.2f}")
+
+    return [
+        {
+            "start": seg.start,
+            "end": seg.end,
+            "text": seg.text.strip(),
+        }
+        for seg in segments
+    ]
+
+
+def diarize_audio(file_path: Path) -> list[dict]:
+    """
+    pyannote.audio ile konuşmacı ayrımı (diarization) yapar.
+    Her konuşma bloğu için başlangıç, bitiş ve konuşmacı etiketi döner.
+    """
+    pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-3.1",
+        use_auth_token=HF_TOKEN,
+    )
+    diarization = pipeline(str(file_path))
+
+    turns = []
+    for turn, _, speaker in diarization.itertracks(yield_label=True):
+        turns.append(
+            {
+                "start": turn.start,
+                "end": turn.end,
+                "speaker": speaker,
+            }
+        )
+    return turns
+
+
+def merge_transcript_with_diarization(
+    segments: list[dict], turns: list[dict]
+) -> list[dict]:
+    """
+    Transkript segmentlerini diarization sonuçlarıyla birleştirir.
+    Her metin segmentine en çok örtüşen konuşmacıyı atar.
+    """
+    merged = []
+    for seg in segments:
+        best_speaker = "UNKNOWN"
+        best_overlap = 0.0
+
+        seg_start, seg_end = seg["start"], seg["end"]
+        for turn in turns:
+            overlap_start = max(seg_start, turn["start"])
+            overlap_end = min(seg_end, turn["end"])
+            overlap = max(0.0, overlap_end - overlap_start)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = turn["speaker"]
+
+        merged.append(
+            {
+                "start": seg_start,
+                "end": seg_end,
+                "speaker": best_speaker,
+                "text": seg["text"],
+            }
+        )
+    return merged
+
+
+def format_transcript_for_llm(merged_segments: list[dict]) -> str:
+    """Birleştirilmiş transkripti LLM'e göndermek için düz metin formatına çevirir."""
+    lines = []
+    for seg in merged_segments:
+        timestamp = f"[{seg['start']:.1f}s - {seg['end']:.1f}s]"
+        lines.append(f"{seg['speaker']} {timestamp}: {seg['text']}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 4. LLM ile Karmaşıklık Çözümü (Ollama)
+# ---------------------------------------------------------------------------
+
+SEGMENT_DETECTION_PROMPT = """Sen deneyimli bir çocuk psikiyatristi asistanısın.
+Aşağıda bir ses kaydına ait transkript ve o güne ait takvim randevusu bilgileri var.
+
+TAKVİM RANDEVULARI:
+{appointments_json}
+
+TRANSKRİPT:
+{transcript}
+
+Görevin:
+1. Transkriptte birden fazla hasta görüşmesi geçiyorsa, her görüşmenin hangi zaman diliminde başlayıp bittiğini tespit et.
+2. Her segmenti ilgili takvim randevusuyla eşleştir.
+3. Eğer tüm transkript tek bir hastaya aitse, bunu da belirt.
+
+Yanıtını SADECE aşağıdaki JSON formatında ver, başka hiçbir açıklama ekleme:
+{{
+  "segments": [
+    {{
+      "appointment_id": "<takvim event_id veya 'unknown'>",
+      "patient_name": "<hasta adı, bilinemiyorsa 'unknown'>",
+      "transcript_start_second": <sayı>,
+      "transcript_end_second": <sayı>,
+      "confidence": "<high|medium|low>"
+    }}
+  ]
+}}"""
+
+
+def detect_session_segments(
+    transcript: str, appointments: list[dict]
+) -> list[dict]:
+    """
+    Ollama üzerinden lokal LLM'e transkript ve randevu verisi göndererek
+    kayıttaki hasta segmentlerini tespit eder.
+    """
+    appointments_clean = [
+        {k: v for k, v in a.items() if k != "start_dt"} for a in appointments
+    ]
+
+    prompt = SEGMENT_DETECTION_PROMPT.format(
+        appointments_json=json.dumps(appointments_clean, ensure_ascii=False, indent=2),
+        transcript=transcript,
+    )
+
+    response = ollama.chat(
+        model=OLLAMA_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        options={"temperature": 0.1},
+    )
+
+    raw = response["message"]["content"].strip()
+    # JSON bloğunu ayıkla (LLM bazen markdown code fence ekleyebilir)
+    json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not json_match:
+        raise ValueError(f"LLM geçerli JSON döndürmedi:\n{raw}")
+
+    return json.loads(json_match.group())["segments"]
+
+
+# ---------------------------------------------------------------------------
+# 5. SOAP Notu Üretimi (Ollama)
+# ---------------------------------------------------------------------------
+
+SOAP_PROMPT = """Sen deneyimli bir çocuk ve ergen psikiyatristi asistanısın.
+Aşağıda bir hasta görüşmesine ait transkript var. Bu transkripti analiz ederek
+Türkçe ve çocuk psikiyatrisine uygun SOAP formatında klinik not oluştur.
+
+HASTA: {patient_name}
+RANDEVU: {appointment_summary}
+
+TRANSKRİPT:
+{transcript}
+
+Yanıtını SADECE aşağıdaki JSON formatında ver:
+{{
+  "patient_name": "{patient_name}",
+  "appointment_id": "{appointment_id}",
+  "soap": {{
+    "subjective": {{
+      "chief_complaint": "<Ana şikayet>",
+      "history_of_present_illness": "<Mevcut hastalık öyküsü>",
+      "family_history": "<Aile öyküsü>",
+      "developmental_history": "<Gelişimsel öykü>"
+    }},
+    "objective": {{
+      "mental_status_exam": "<Ruhsal durum muayenesi>",
+      "behavior_observations": "<Davranış gözlemleri>",
+      "affect_mood": "<Duygudurum ve afekt>"
+    }},
+    "assessment": {{
+      "provisional_diagnosis": "<Ön tanı>",
+      "differential_diagnosis": "<Ayırıcı tanı>",
+      "risk_assessment": "<Risk değerlendirmesi>"
+    }},
+    "plan": {{
+      "medication": "<İlaç tedavisi (varsa)>",
+      "therapy": "<Psikoterapi planı>",
+      "parent_guidance": "<Aile/veli yönlendirmesi>",
+      "follow_up": "<Takip planı>",
+      "referrals": "<Yönlendirmeler (varsa)>"
+    }}
+  }},
+  "generated_at": "{generated_at}"
+}}"""
+
+
+def generate_soap_note(
+    transcript_segment: str,
+    patient_name: str,
+    appointment_id: str,
+    appointment_summary: str,
+) -> dict:
+    """
+    Ollama üzerinden lokal LLM'e transkript segmenti göndererek
+    SOAP formatında klinik not üretir.
+    """
+    prompt = SOAP_PROMPT.format(
+        patient_name=patient_name,
+        appointment_id=appointment_id,
+        appointment_summary=appointment_summary,
+        transcript=transcript_segment,
+        generated_at=datetime.now().isoformat(),
+    )
+
+    response = ollama.chat(
+        model=OLLAMA_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        options={"temperature": 0.2},
+    )
+
+    raw = response["message"]["content"].strip()
+    json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not json_match:
+        raise ValueError(f"LLM geçerli JSON döndürmedi:\n{raw}")
+
+    return json.loads(json_match.group())
+
+
+# ---------------------------------------------------------------------------
+# 6. Ana Orkestratör
+# ---------------------------------------------------------------------------
+
+def process_audio_file(file_path: Path, calendar_service) -> list[dict]:
+    """
+    Tek bir ses dosyasını uçtan uca işler:
+    metadata → takvim eşleştirme → transkripsiyon → diarization →
+    segment tespiti → SOAP üretimi
+    """
+    print(f"\n{'='*60}")
+    print(f"İşleniyor: {file_path.name}")
+
+    # 1. Metadata
+    meta = get_audio_metadata(file_path)
+    recorded_at = meta["recorded_at_dt"]
+    print(f"Kayıt zamanı: {recorded_at.isoformat()}")
+
+    # 2. Takvim eşleştirme
+    appointments = fetch_day_appointments(calendar_service, recorded_at)
+    matched = match_appointments(recorded_at, appointments)
+    print(f"Eşleşen randevu sayısı: {len(matched)}")
+
+    # 3. Transkripsiyon + Diarization
+    print("Transkripsiyon başlıyor...")
+    segments = transcribe_audio(file_path)
+    print(f"  {len(segments)} transkript segmenti")
+
+    print("Konuşmacı ayrımı başlıyor...")
+    turns = diarize_audio(file_path)
+    print(f"  {len(turns)} konuşmacı bloğu")
+
+    merged = merge_transcript_with_diarization(segments, turns)
+    full_transcript = format_transcript_for_llm(merged)
+
+    # 4. Karmaşıklık çözümü
+    print("LLM ile hasta segmentleri tespit ediliyor...")
+    detected_segments = detect_session_segments(full_transcript, matched)
+    print(f"  {len(detected_segments)} hasta segmenti bulundu")
+
+    # 5. Her segment için SOAP notu
+    soap_notes = []
+    for seg in detected_segments:
+        # Transkriptten ilgili zaman aralığını ayıkla
+        seg_lines = [
+            line
+            for line, raw_seg in zip(
+                full_transcript.splitlines(), merged
+            )
+            if seg["transcript_start_second"]
+            <= raw_seg["start"]
+            <= seg["transcript_end_second"]
+        ]
+        seg_transcript = "\n".join(seg_lines) if seg_lines else full_transcript
+
+        # İlgili randevuyu bul
+        appointment = next(
+            (a for a in matched if a["event_id"] == seg.get("appointment_id")),
+            {"event_id": seg.get("appointment_id", "unknown"), "summary": ""},
+        )
+
+        print(f"  SOAP üretiliyor: {seg.get('patient_name', 'unknown')}")
+        soap = generate_soap_note(
+            transcript_segment=seg_transcript,
+            patient_name=seg.get("patient_name", "unknown"),
+            appointment_id=appointment["event_id"],
+            appointment_summary=appointment.get("summary", ""),
+        )
+        soap_notes.append(soap)
+
+    # Çıktıyı JSON dosyasına kaydet
+    output_path = file_path.with_suffix(".soap.json")
+    output_path.write_text(
+        json.dumps(soap_notes, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"SOAP notları kaydedildi: {output_path}")
+
+    return soap_notes
+
+
+def run_inbox_processor():
+    """
+    AUDIO_INBOX_DIR klasöründeki tüm .m4a ve .mp3 dosyalarını işler.
+    İşlenen dosyaları ./audio_processed/ klasörüne taşır.
+    """
+    AUDIO_INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    processed_dir = AUDIO_INBOX_DIR.parent / "audio_processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    audio_files = list(AUDIO_INBOX_DIR.glob("*.m4a")) + list(
+        AUDIO_INBOX_DIR.glob("*.mp3")
+    )
+
+    if not audio_files:
+        print("İşlenecek ses dosyası bulunamadı.")
+        return
+
+    calendar_service = get_calendar_service()
+
+    all_results = []
+    for audio_file in sorted(audio_files):
+        try:
+            soap_notes = process_audio_file(audio_file, calendar_service)
+            all_results.extend(soap_notes)
+            # İşlenen dosyayı taşı
+            audio_file.rename(processed_dir / audio_file.name)
+        except Exception as exc:
+            print(f"HATA [{audio_file.name}]: {exc}")
+
+    print(f"\nToplam işlenen hasta görüşmesi: {len(all_results)}")
+    return all_results
+
+
+if __name__ == "__main__":
+    run_inbox_processor()

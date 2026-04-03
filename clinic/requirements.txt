@@ -1,0 +1,23 @@
+# Modül 1 - Transkripsiyon ve Hasta Eşleştirme
+tinytag>=1.10.1
+faster-whisper>=1.0.3
+pyannote.audio>=3.3.2
+ollama>=0.3.3
+
+# Google API (Calendar + Forms)
+google-api-python-client>=2.130.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+
+# Modül 2 - Notion Arşivleme
+notion-client>=2.2.1
+requests>=2.32.0
+
+# Modül 3 - WhatsApp İletişimi
+flask>=3.0.3
+
+# Modül 4 - e-SMM (requests zaten yukarıda mevcut)
+
+# Modül 5 - Samsung Notes Migrasyonu
+python-docx>=1.1.2
+markdown-it-py>=3.0.0
