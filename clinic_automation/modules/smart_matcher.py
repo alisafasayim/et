@@ -142,13 +142,14 @@ class SmartMatcher:
             patient_segments = self._match_multi_patient(
                 transcription, day_appointments, split_points, file_name
             )
+            needs_review = any(s.confidence < self.CONFIDENCE_AUTO_ACCEPT for s in patient_segments)
             return MatchResult(
                 audio_path=audio_path,
                 audio_date=file_date,
                 patient_segments=patient_segments,
                 is_multi_patient=True,
-                needs_review=any(s.confidence < 0.7 for s in patient_segments),
-                review_reason="Çoklu hasta kaydı tespit edildi, doğrulama önerilir.",
+                needs_review=needs_review,
+                review_reason="Çoklu hasta kaydı tespit edildi, doğrulama önerilir." if needs_review else "",
             )
 
         # 4. Tek hasta eşleştirmesi
@@ -159,14 +160,25 @@ class SmartMatcher:
         # 5. Parçalı kayıt kontrolü
         is_part = self._detect_partial_recording(filename)
 
+        # 6. Güven seviyesine göre inceleme kararı
+        if segment.confidence >= self.CONFIDENCE_AUTO_ACCEPT:
+            needs_review = False
+            review_reason = ""
+        elif segment.confidence >= self.CONFIDENCE_REVIEW:
+            needs_review = True
+            review_reason = f"Güven skoru {segment.confidence:.0%} < %{self.CONFIDENCE_AUTO_ACCEPT:.0%}, manuel doğrulama önerilir."
+        else:
+            needs_review = True
+            review_reason = f"Düşük güven skoru ({segment.confidence:.0%}), eşleştirme reddedildi. Manuel inceleme kuyruğuna alındı."
+
         return MatchResult(
             audio_path=audio_path,
             audio_date=file_date,
             patient_segments=[segment],
             is_multi_patient=False,
             is_multi_part=is_part,
-            needs_review=segment.confidence < 0.6,
-            review_reason="" if segment.confidence >= 0.6 else "Düşük güven skoru, manuel doğrulama gerekli.",
+            needs_review=needs_review,
+            review_reason=review_reason,
         )
 
     def _filter_appointments_by_date(
@@ -332,6 +344,16 @@ class SmartMatcher:
             match_reasons=["Sadece dosya adından tahmin"] if file_name else ["Eşleşme bulunamadı"],
         )
 
+    # Çoklu kaynak eşleşme bonusu: aynı hasta ID birden fazla kaynakta -> +0.15
+    MULTI_SOURCE_BONUS = 0.15
+
+    # Manuel inceleme eşikleri (ses_kayit_sistemi_tasarimi.md)
+    CONFIDENCE_AUTO_ACCEPT = 0.70   # Otomatik kabul
+    CONFIDENCE_REVIEW = 0.50        # Manuel inceleme
+    CONFIDENCE_REJECT = 0.30        # Reddedilir, kuyruğa alınır
+    TRANSCRIPTION_QUALITY_MIN = 0.6 # Minimum transkripsiyon kalitesi
+    DATE_MISMATCH_MAX_DAYS = 7      # Tarih uyuşmazlığı toleransı
+
     def _score_appointments(
         self,
         appointments: list[Appointment],
@@ -343,11 +365,13 @@ class SmartMatcher:
     ) -> Optional[tuple[Appointment, float, list[str]]]:
         """Her randevuyu skorlar ve en iyi eşleşmeyi döndürür.
 
-        Skorlama kriterleri (toplam 1.0):
-        - Dosya adı isim eşleşmesi:    0.35
-        - Calendar zaman eşleşmesi:     0.30
+        Skorlama kriterleri (toplam 1.0 + bonus):
+        - Dosya adı isim eşleşmesi:    0.30
+        - Calendar zaman eşleşmesi:     0.25
         - Transkript içerik eşleşmesi:  0.25
+        - Veritabanı (Notion) eşleşmesi: 0.10
         - Süre uyumu:                   0.10
+        - Çoklu kaynak bonusu:          +0.15
         """
         if not appointments:
             return None
@@ -357,39 +381,46 @@ class SmartMatcher:
         for appt in appointments:
             score = 0.0
             reasons = []
+            source_matches = 0  # Kaç kaynaktan eşleşme var
 
-            # 1. Dosya adı isim eşleşmesi (0.35)
+            # 1. Dosya adı isim eşleşmesi (0.30)
             if file_name and fuzzy_name_match(file_name, appt.patient_name):
-                score += 0.35
+                score += 0.30
+                source_matches += 1
                 reasons.append(f"Dosya adı eşleşmesi: '{file_name}' ≈ '{appt.patient_name}'")
 
-            # 2. Calendar zaman eşleşmesi (0.30)
+            # 2. Calendar zaman eşleşmesi (0.25)
             duration_seconds = segment_end - segment_start
             if duration_seconds > 0:
-                # Ses kaydının zamanı, randevu sırasında mı?
                 audio_date = extract_date_from_filename(Path(transcription.audio_path).name)
                 if audio_date:
-                    # Randevu süresini sıralama olarak değerlendir
                     appt_order = appointments.index(appt)
                     total_appts = len(appointments)
-                    # Ses dosyasının kaçıncı parça olduğunu tahmin et
                     relative_position = segment_start / max(transcription.duration_seconds, 1)
 
                     if total_appts > 0:
                         expected_position = appt_order / total_appts
                         position_diff = abs(relative_position - expected_position)
-                        time_score = max(0, 0.30 * (1 - position_diff * 2))
+                        time_score = max(0, 0.25 * (1 - position_diff * 2))
                         score += time_score
-                        if time_score > 0.15:
+                        if time_score > 0.12:
+                            source_matches += 1
                             reasons.append(f"Zaman sırası uyumlu (sıra: {appt_order + 1}/{total_appts})")
 
             # 3. Transkript içerik eşleşmesi (0.25)
             content_score = self._score_content_match(text, appt.patient_name)
             score += content_score * 0.25
             if content_score > 0.5:
+                source_matches += 1
                 reasons.append("Transkriptte isim/bağlam eşleşmesi")
 
-            # 4. Süre uyumu (0.10)
+            # 4. Veritabanı (bilinen hasta) eşleşmesi (0.10)
+            if any(fuzzy_name_match(appt.patient_name, known) for known in self.known_patients):
+                score += 0.10
+                source_matches += 1
+                reasons.append("Notion veritabanında kayıtlı hasta")
+
+            # 5. Süre uyumu (0.10)
             segment_duration_min = (segment_end - segment_start) / 60
             appt_duration_min = appt.duration_minutes
             if appt_duration_min > 0:
@@ -400,6 +431,11 @@ class SmartMatcher:
                 score += duration_score
                 if duration_ratio > 0.5:
                     reasons.append(f"Süre uyumu: {segment_duration_min:.0f}dk ≈ {appt_duration_min}dk")
+
+            # 6. Çoklu kaynak bonusu (+0.15)
+            if source_matches >= 2:
+                score += self.MULTI_SOURCE_BONUS
+                reasons.append(f"Çoklu kaynak bonusu: {source_matches} kaynak eşleşti (+{self.MULTI_SOURCE_BONUS})")
 
             scores.append((appt, score, reasons))
 

@@ -21,9 +21,14 @@ from clinic_automation.modules.google_calendar import GoogleCalendarClient, Appo
 from clinic_automation.modules.google_forms import GoogleFormsClient
 from clinic_automation.modules.whatsapp import WhatsAppAutomation
 from clinic_automation.modules.transcription import AudioTranscriber
+from clinic_automation.modules.audio_preprocessing import AudioPreprocessor
 from clinic_automation.modules.smart_matcher import SmartMatcher, merge_partial_recordings
 from clinic_automation.modules.clinical_notes import ClinicalNoteGenerator
 from clinic_automation.modules.notion_client import NotionClient
+from clinic_automation.modules.risk_assessment import RiskAssessor, RiskLevel, RISK_LABELS_TR
+from clinic_automation.modules.patient_journey import JourneyManager, JourneyStage, Priority
+from clinic_automation.modules.chatbot import ChatbotEngine
+from clinic_automation.modules.dsm5_codes import search_diagnosis, ScaleScorer
 from clinic_automation.migrations.samsung_notes import SamsungNoteMigrator
 from clinic_automation.utils.security import EncryptionManager, AuditLogger
 from clinic_automation.templates.clinical_note_template import (
@@ -52,9 +57,17 @@ class ClinicAutomation:
         self.forms = GoogleFormsClient(self.config.google)
         self.whatsapp = WhatsAppAutomation(self.config.whatsapp)
         self.transcriber = AudioTranscriber(self.config.transcription)
+        self.preprocessor = AudioPreprocessor()
         self.note_generator = ClinicalNoteGenerator(self.config.llm)
         self.notion = NotionClient(self.config.notion)
-        self.encryption = EncryptionManager(self.config.security.encryption_key_path)
+        self.risk_assessor = RiskAssessor()
+        self.journey_manager = JourneyManager()
+        self.chatbot = ChatbotEngine(self.config.whatsapp)
+        self.scale_scorer = ScaleScorer()
+        self.encryption = EncryptionManager(
+            self.config.security.encryption_key_path,
+            self.config.security.rsa_key_path,
+        )
         self.audit = AuditLogger(self.config.security.audit_log_path)
 
     def process_audio_files(
@@ -66,13 +79,14 @@ class ClinicAutomation:
         """Ana iş akışı: ses dosyalarını işle ve Notion'a yaz.
 
         Adımlar:
-        1. Ses dosyalarını bul
+        1. Ses dosyalarını bul ve ön-işle
         2. Calendar'dan randevuları çek
         3. Her dosyayı transkript et
         4. Akıllı eşleştirme yap
         5. Parçalı kayıtları birleştir
-        6. Klinik not üret
-        7. Notion'a yaz
+        6. Risk değerlendirmesi yap
+        7. Klinik not üret
+        8. Notion'a yaz (5 veritabanı)
         """
         results = []
 
@@ -83,6 +97,24 @@ class ClinicAutomation:
             return results
 
         console.print(f"\n[bold]{len(audio_files)} ses dosyası bulundu.[/bold]\n")
+
+        # 1b. Ses ön-işleme (kalite kontrol, normalizasyon)
+        console.print("[dim]Ses ön-işleme yapılıyor...[/dim]")
+        preprocessed_map = {}
+        for af in audio_files:
+            try:
+                analysis = self.preprocessor.analyze(str(af))
+                if analysis.needs_preprocessing:
+                    processed = self.preprocessor.preprocess(str(af))
+                    preprocessed_map[str(af)] = {"path": processed, "quality": analysis.quality.value}
+                else:
+                    preprocessed_map[str(af)] = {"path": str(af), "quality": analysis.quality.value}
+
+                if analysis.quality.value == "poor":
+                    console.print(f"  [yellow]Düşük kalite: {af.name} (SNR: {analysis.snr_db:.1f}dB)[/yellow]")
+            except Exception as e:
+                logger.warning("Ön-işleme atlandı (%s): %s", af.name, e)
+                preprocessed_map[str(af)] = {"path": str(af), "quality": "unknown"}
 
         # 2. Bilinen hastaları Notion'dan çek
         known_patients = []
@@ -109,8 +141,12 @@ class ClinicAutomation:
                 progress.update(task, description=f"İşleniyor: {audio_file.name}")
 
                 try:
+                    # İşlenmiş dosyayı kullan
+                    process_info = preprocessed_map.get(str(audio_file), {})
+                    process_path = process_info.get("path", str(audio_file))
+
                     # Transkripsiyon
-                    transcription = self.transcriber.transcribe(str(audio_file))
+                    transcription = self.transcriber.transcribe(process_path)
                     self.audit.log_data_access("audio", str(audio_file), "TRANSCRIBE")
 
                     # Calendar verisi
@@ -142,7 +178,7 @@ class ClinicAutomation:
         # 5. Parçalı kayıtları birleştir
         match_results = merge_partial_recordings(match_results)
 
-        # 6-7. Klinik not üret ve Notion'a yaz
+        # 6-8. Risk değerlendirmesi + Klinik not üret + Notion'a yaz (5 DB)
         console.print(f"\n[bold]Klinik notlar üretiliyor...[/bold]\n")
 
         for match in match_results:
@@ -159,15 +195,27 @@ class ClinicAutomation:
 
                     date_str = match.audio_date.strftime("%Y-%m-%d") if match.audio_date else "Bilinmiyor"
 
+                    # Risk değerlendirmesi
+                    risk = self.risk_assessor.assess_from_transcript(
+                        segment.patient_name, segment.transcript_text, date_str
+                    )
+                    if risk.overall_level >= RiskLevel.HIGH:
+                        console.print(
+                            f"  [bold red]!! YÜKSEK RİSK: {segment.patient_name} "
+                            f"({RISK_LABELS_TR[risk.overall_level]})[/bold red]"
+                        )
+
                     if dry_run:
+                        risk_label = RISK_LABELS_TR.get(risk.overall_level, "?")
                         console.print(
                             f"  [dim][DRY RUN] {segment.patient_name} - {date_str} "
-                            f"(güven: {segment.confidence:.0%})[/dim]"
+                            f"(güven: {segment.confidence:.0%}, risk: {risk_label})[/dim]"
                         )
                         results.append({
                             "patient": segment.patient_name,
                             "date": date_str,
                             "confidence": segment.confidence,
+                            "risk_level": risk_label,
                             "status": "dry_run",
                         })
                         continue
@@ -177,11 +225,35 @@ class ClinicAutomation:
                         segment, date_str, form_data
                     )
 
-                    # Notion'a yaz
+                    # Notion'a yaz - Hasta kaydı
                     patient = self.notion.get_or_create_patient(
                         segment.patient_name, form_data
                     )
+
+                    # Notion'a yaz - Konsültasyon (klinik not)
                     page_id = self.notion.add_clinical_note(patient, note)
+
+                    # Notion'a yaz - Ses kaydı metadata
+                    audio_quality = preprocessed_map.get(match.audio_path, {}).get("quality", "")
+                    try:
+                        self.notion.add_audio_record(
+                            patient=patient,
+                            audio_path=match.audio_path,
+                            session_date=date_str,
+                            duration_seconds=segment.end_time - segment.start_time,
+                            quality=audio_quality,
+                            confidence=segment.confidence,
+                            transcript_preview=segment.transcript_text[:500],
+                        )
+                    except Exception as e:
+                        logger.warning("Ses kaydı DB'ye eklenemedi: %s", e)
+
+                    # Notion'a yaz - Form yanıtı (varsa)
+                    if form_data:
+                        try:
+                            self.notion.add_form_response(patient, form_data)
+                        except Exception as e:
+                            logger.warning("Form yanıtı DB'ye eklenemedi: %s", e)
 
                     self.audit.log_data_access(
                         patient.page_id, "clinical_note", "CREATE"
@@ -189,15 +261,17 @@ class ClinicAutomation:
 
                     # Sonuç göster
                     status = "needs_review" if match.needs_review else "success"
+                    risk_label = RISK_LABELS_TR.get(risk.overall_level, "?")
                     console.print(
                         f"  [green]✓[/green] {segment.patient_name} - {date_str} "
-                        f"(güven: {segment.confidence:.0%})"
+                        f"(güven: {segment.confidence:.0%}, risk: {risk_label})"
                     )
 
                     results.append({
                         "patient": segment.patient_name,
                         "date": date_str,
                         "confidence": segment.confidence,
+                        "risk_level": risk_label,
                         "page_id": page_id,
                         "status": status,
                         "note_preview": note.chief_complaint[:100],
@@ -300,6 +374,7 @@ def process(ctx, audio_dir, target_date, dry_run):
     table.add_column("Hasta", style="cyan")
     table.add_column("Tarih")
     table.add_column("Güven", justify="right")
+    table.add_column("Risk")
     table.add_column("Durum")
 
     for r in results:
@@ -309,10 +384,14 @@ def process(ctx, audio_dir, target_date, dry_run):
             "error": "[red]Hata[/red]",
             "dry_run": "[dim]Simülasyon[/dim]",
         }
+        risk = r.get("risk_level", "?")
+        risk_style = {"Kritik": "[bold red]Kritik[/bold red]", "Yüksek": "[red]Yüksek[/red]",
+                       "Orta": "[yellow]Orta[/yellow]", "Düşük": "[green]Düşük[/green]"}.get(risk, risk)
         table.add_row(
             r["patient"],
             r.get("date", "?"),
             f"{r.get('confidence', 0):.0%}",
+            risk_style,
             status_style.get(r["status"], r["status"]),
         )
 
@@ -429,6 +508,71 @@ def status(ctx):
     )
 
     console.print(table)
+
+
+@cli.command()
+@click.argument("query")
+@click.pass_context
+def dsm5(ctx, query):
+    """DSM-5 tanı kodu ara. Örnek: clinic dsm5 'DEHB'"""
+    results = search_diagnosis(query)
+    if not results:
+        console.print(f"[yellow]'{query}' için sonuç bulunamadı.[/yellow]")
+        return
+
+    table = Table(title=f"DSM-5 Arama: '{query}'")
+    table.add_column("Kod", style="cyan")
+    table.add_column("Tanı (TR)")
+    table.add_column("Tanı (EN)")
+    table.add_column("Kategori")
+
+    for d in results:
+        table.add_row(d.code, d.name_tr, d.name_en, d.category)
+
+    console.print(table)
+
+
+@cli.command()
+@click.argument("directory")
+@click.pass_context
+def preprocess(ctx, directory):
+    """Ses dosyalarını toplu ön-işle (normalizasyon, gürültü azaltma)."""
+    app: ClinicAutomation = ctx.obj["app"]
+
+    console.print(Panel(f"[bold]Ses Ön-İşleme[/bold]\nDizin: {directory}", title="Ön-İşleme"))
+
+    results = app.preprocessor.batch_preprocess(directory)
+
+    table = Table(title="Ön-İşleme Sonuçları")
+    table.add_column("Dosya", style="cyan")
+    table.add_column("Kalite")
+    table.add_column("Durum")
+
+    for r in results:
+        quality_style = {"excellent": "[green]", "good": "[green]", "fair": "[yellow]", "poor": "[red]"}.get(r.get("quality", ""), "[dim]")
+        status_style = {"processed": "[green]İşlendi[/green]", "skipped": "[dim]Atlandı[/dim]", "error": "[red]Hata[/red]"}.get(r["status"], r["status"])
+        table.add_row(
+            Path(r["file"]).name,
+            f"{quality_style}{r.get('quality', '?')}[/]" if quality_style.startswith("[") else r.get("quality", "?"),
+            status_style,
+        )
+
+    console.print(table)
+
+
+@cli.command()
+@click.pass_context
+def audit(ctx):
+    """Denetim kaydı bütünlüğünü doğrula."""
+    app: ClinicAutomation = ctx.obj["app"]
+
+    console.print("[bold]Denetim kaydı bütünlüğü kontrol ediliyor...[/bold]")
+    is_valid, count = app.audit.verify_chain_integrity()
+
+    if is_valid:
+        console.print(f"[bold green]Bütünlük doğrulandı: {count} kayıt.[/bold green]")
+    else:
+        console.print(f"[bold red]BÜTÜNLÜK BOZUK! Doğrulanan: {count} kayıt.[/bold red]")
 
 
 if __name__ == "__main__":

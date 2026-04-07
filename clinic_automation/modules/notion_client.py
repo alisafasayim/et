@@ -1,13 +1,19 @@
 """
 Notion Entegrasyon Modülü
 =========================
-Hasta veritabanı yönetimi, klinik not ekleme,
-randevu ve form verisi senkronizasyonu.
+5 veritabanı tasarımı:
+1. Hastalar - demografik bilgiler, durum
+2. Konsültasyonlar (Seanslar) - görüşme notları, randevular
+3. Ses Kayıtları - ses dosyası metadata, transkript
+4. Form Yanıtları - anamnez formları
+5. Personel - hekim ve personel bilgileri
+
+Doküman: notion_psikiyatri_semasi.md
 """
 
 import logging
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Any
 
 from notion_client import Client as NotionSDK
@@ -27,15 +33,22 @@ class NotionPatient:
     page_id: str
     name: str
     age: str = ""
+    age_group: str = ""     # Okul Öncesi, İlkokul, Ortaokul, Lise
     parent_name: str = ""
     phone: str = ""
     diagnosis: str = ""
-    status: str = "Aktif"  # Aktif, Pasif, Takip
+    diagnosis_codes: list[str] = field(default_factory=list)  # DSM-5 kodları
+    status: str = "Aktif"   # Aktif, Pasif, Takip, Değerlendirmede
+    priority: str = "Rutin"  # Rutin, Yakın, Acil
+    risk_level: str = "Düşük"
+    referral_source: str = ""
+    journey_stage: str = "basvuru"
     created_at: str = ""
+    last_session: str = ""
 
 
 class NotionClient:
-    """Notion API istemcisi."""
+    """Notion API istemcisi - 5 veritabanı yönetimi."""
 
     def __init__(self, config: NotionConfig):
         self.config = config
@@ -322,6 +335,83 @@ class NotionClient:
         )
         results = response.get("results", [])
         return results[0] if results else None
+
+    # ─────────────────── Ses Kayıtları DB ───────────────────
+
+    def add_audio_record(
+        self,
+        patient: NotionPatient,
+        audio_path: str,
+        session_date: str,
+        duration_seconds: float,
+        quality: str = "",
+        confidence: float = 0.0,
+        transcript_preview: str = "",
+    ) -> str:
+        """Ses kaydı metadata'sını Notion'a ekler."""
+        from pathlib import Path
+        filename = Path(audio_path).name
+
+        properties: dict[str, Any] = {
+            "Başlık": {"title": [{"text": {"content": f"{session_date}_{patient.name}_{filename}"}}]},
+            "Hasta": {"relation": [{"id": patient.page_id}]},
+            "Tarih": {"date": {"start": session_date}},
+            "Dosya Adı": {"rich_text": [{"text": {"content": filename}}]},
+            "Süre (sn)": {"number": round(duration_seconds)},
+            "Eşleşme Güveni": {"number": round(confidence * 100)},
+        }
+
+        if quality:
+            properties["Kalite"] = {"select": {"name": quality}}
+
+        page = self.client.pages.create(
+            parent={"database_id": self.config.audio_records_db_id},
+            properties=properties,
+        )
+
+        # Transkript önizlemesini sayfa içeriğine ekle
+        if transcript_preview:
+            blocks = [{
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Transkript Önizleme"}}]},
+            }]
+            for chunk in self._chunk_text(transcript_preview[:4000], 2000):
+                blocks.append({
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": chunk}}]},
+                })
+            self.client.blocks.children.append(block_id=page["id"], children=blocks)
+
+        logger.info("Ses kaydı eklendi: %s - %s", patient.name, filename)
+        return page["id"]
+
+    # ─────────────────── Form Yanıtları DB ───────────────────
+
+    def add_form_response(
+        self,
+        patient: NotionPatient,
+        form_response: FormResponse,
+    ) -> str:
+        """Form yanıtını Notion'a ekler."""
+        properties: dict[str, Any] = {
+            "Başlık": {"title": [{"text": {"content": f"Anamnez - {patient.name}"}}]},
+            "Hasta": {"relation": [{"id": patient.page_id}]},
+            "Form Tarihi": {"date": {"start": form_response.submitted_at.strftime("%Y-%m-%d")}},
+            "Şikayet": {"rich_text": [{"text": {"content": (form_response.complaint or "")[:2000]}}]},
+        }
+
+        page = self.client.pages.create(
+            parent={"database_id": self.config.form_responses_db_id},
+            properties=properties,
+        )
+
+        # Detaylı form verilerini sayfa içeriğine ekle
+        self._add_anamnesis_to_page(page["id"], form_response)
+
+        logger.info("Form yanıtı eklendi: %s", patient.name)
+        return page["id"]
 
     # ─────────────────── Yardımcı Fonksiyonlar ───────────────────
 
