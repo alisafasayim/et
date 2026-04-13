@@ -74,6 +74,7 @@ INTENT_PATTERNS: dict[Intent, list[str]] = {
         r"(?:randevu|kontrol).*(?:onay|tamam|gelec)",
         r"(?:onay|tamam|evet|gelec).*(?:randevu|kontrol)",
         r"^(?:evet|tamam|olur|geliyoruz|geleceğiz)$",
+        r"evet\s+(?:geliyoruz|geleceğiz|geliriz|geldik|gelirim)",
     ],
     Intent.MEDICATION_QUESTION: [
         r"(?:ilaç|ilac|hap|şurup|damla).*(?:nasıl|ne\s*zaman|kaç|bitt|devam)",

@@ -109,6 +109,9 @@ def fuzzy_name_match(name1: str, name2: str, threshold: float = 0.8) -> bool:
     n1 = normalize_turkish_name(name1)
     n2 = normalize_turkish_name(name2)
 
+    if not n1 or not n2:
+        return False
+
     if n1 == n2:
         return True
 

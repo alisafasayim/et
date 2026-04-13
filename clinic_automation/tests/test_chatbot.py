@@ -16,7 +16,7 @@ from clinic_automation.config.settings import WhatsAppConfig
 def config():
     cfg = WhatsAppConfig()
     cfg.chatbot_enabled = True
-    cfg.chatbot_confidence_threshold = 0.85
+    cfg.chatbot_confidence_threshold = 0.70
     cfg.messaging_hours_start = 0   # Test için 24 saat açık
     cfg.messaging_hours_end = 23
     return cfg

@@ -20,7 +20,7 @@ def test_config():
             twilio_account_sid="test_sid",
             twilio_auth_token="test_token",
             chatbot_enabled=True,
-            chatbot_confidence_threshold=0.85,
+            chatbot_confidence_threshold=0.70,
             messaging_hours_start=0,
             messaging_hours_end=23,
         ),

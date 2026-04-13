@@ -125,6 +125,8 @@ RISK_KEYWORDS = {
         ],
         RiskLevel.HIGH: [
             r"(?:dövül|dayak|şiddet).*(?:ev|anne|baba)",
+            r"(?:ev|anne|baba).*(?:dövül|dayak|şiddet)",
+            r"fiziksel\s+şiddet",
             r"aç\s*bırak",
             r"(?:eve|odaya)\s*(?:kilit|kapat)",
             r"korku.*(?:anne|baba)",
