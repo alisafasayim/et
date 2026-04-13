@@ -17,8 +17,12 @@ faster-whisper>=1.0.0
 # LLM
 anthropic>=0.39.0
 
-# Güvenlik
+# Güvenlik (RSA+AES+Fernet)
 cryptography>=41.0.0
+
+# Webhook Sunucusu
+flask>=3.0.0
+gunicorn>=21.2.0
 
 # Yardımcı
 python-dotenv>=1.0.0
@@ -28,3 +32,7 @@ pytz>=2023.3
 rich>=13.7.0
 click>=8.1.0
 tqdm>=4.66.0
+
+# Test
+pytest>=7.4.0
+pytest-cov>=4.1.0
