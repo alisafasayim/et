@@ -105,6 +105,87 @@ class NotionClient:
                 return patient
         return None
 
+    def find_patient_by_phone(self, phone: str) -> Optional[NotionPatient]:
+        """Telefon numarasına göre hasta arar (WhatsApp chatbot için)."""
+        normalized = self._normalize_phone(phone)
+        if not normalized:
+            return None
+        for patient in self.get_all_patients():
+            if self._normalize_phone(patient.phone) == normalized:
+                return patient
+        return None
+
+    @staticmethod
+    def _normalize_phone(phone: str) -> str:
+        """Telefon numarasını karşılaştırma için normalize eder."""
+        if not phone:
+            return ""
+        digits = "".join(c for c in phone if c.isdigit())
+        # Türkiye için: 0 veya 90 önekini kaldır
+        if digits.startswith("90") and len(digits) == 12:
+            digits = digits[2:]
+        elif digits.startswith("0") and len(digits) == 11:
+            digits = digits[1:]
+        return digits
+
+    def get_patient_summary(self, patient: NotionPatient, max_sessions: int = 5) -> str:
+        """
+        Hasta dosyasının kısa özetini döner (chatbot context için).
+
+        İçerik: temel bilgiler + son seanslar + aktif tanı + risk seviyesi.
+        """
+        lines = [
+            f"HASTA: {patient.name}",
+            f"Yaş: {patient.age or '?'} ({patient.age_group or '?'})",
+            f"Veli: {patient.parent_name or '?'}",
+            f"Tanı: {patient.diagnosis or 'Belirsiz'}",
+            f"Durum: {patient.status} | Öncelik: {patient.priority} | Risk: {patient.risk_level}",
+            f"Yolculuk Aşaması: {patient.journey_stage}",
+            f"Son Randevu: {patient.last_session or '?'}",
+        ]
+
+        # Son seansları çek
+        try:
+            sessions = self._get_recent_sessions(patient.page_id, limit=max_sessions)
+            if sessions:
+                lines.append("")
+                lines.append(f"SON {len(sessions)} SEANS:")
+                for s in sessions:
+                    lines.append(f"  - {s['date']} | {s.get('type', '')} | Risk: {s.get('risk', '-')}")
+        except Exception as e:
+            logger.warning("Seans özeti alınamadı: %s", e)
+
+        return "\n".join(lines)
+
+    def _get_recent_sessions(self, patient_page_id: str, limit: int = 5) -> list[dict]:
+        """Hastanın son seanslarını getirir."""
+        if not self.config.sessions_db_id:
+            return []
+        try:
+            response = self.client.databases.query(
+                database_id=self.config.sessions_db_id,
+                filter={
+                    "property": "Hasta",
+                    "relation": {"contains": patient_page_id},
+                },
+                sorts=[{"property": "Tarih", "direction": "descending"}],
+                page_size=limit,
+            )
+        except Exception as e:
+            logger.warning("Seans sorgusu başarısız: %s", e)
+            return []
+
+        results = []
+        for page in response.get("results", []):
+            props = page.get("properties", {})
+            date_prop = props.get("Tarih", {}).get("date") or {}
+            results.append({
+                "date": date_prop.get("start", "?"),
+                "type": self._get_select(props.get("Seans Türü", {})),
+                "risk": self._get_select(props.get("Risk Seviyesi", {})),
+            })
+        return results
+
     def create_patient(
         self,
         name: str,

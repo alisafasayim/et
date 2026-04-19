@@ -46,9 +46,28 @@ logger = logging.getLogger(__name__)
 config = get_config()
 app = Flask(__name__)
 
-chatbot = ChatbotEngine(config.whatsapp)
+# Notion client (hasta dosyası bağlamı için, isteğe bağlı)
+notion_client = None
+if config.notion.api_key and config.notion.patients_db_id:
+    try:
+        from clinic_automation.modules.notion_client import NotionClient
+        notion_client = NotionClient(config.notion)
+        logger.info("Notion entegrasyonu aktif - hasta dosyalarına erişim var.")
+    except Exception as e:
+        logger.warning("Notion başlatılamadı: %s", e)
+
+chatbot = ChatbotEngine(
+    config.whatsapp,
+    notion_client=notion_client,
+    llm_config=config.llm,
+)
 whatsapp = WhatsAppAutomation(config.whatsapp)
 audit = AuditLogger(config.security.audit_log_path)
+
+if config.llm.anthropic_api_key:
+    logger.info("Claude LLM aktif - akıllı yanıtlar devrede.")
+else:
+    logger.info("Claude LLM ayarlanmamış - sadece şablon yanıtlar kullanılacak.")
 
 
 # ─────────────────── Twilio Webhook ───────────────────
@@ -183,6 +202,8 @@ def health_check():
         "timestamp": datetime.now().isoformat(),
         "chatbot": "enabled" if config.whatsapp.chatbot_enabled else "disabled",
         "provider": config.whatsapp.provider,
+        "notion": "connected" if notion_client else "not_configured",
+        "llm": "claude" if config.llm.anthropic_api_key else "template_only",
     }
 
 

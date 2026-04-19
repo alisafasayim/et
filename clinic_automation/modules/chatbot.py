@@ -16,9 +16,9 @@ import logging
 from datetime import datetime, time as dtime
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Optional, Any
 
-from clinic_automation.config.settings import WhatsAppConfig
+from clinic_automation.config.settings import WhatsAppConfig, LLMConfig
 
 logger = logging.getLogger(__name__)
 
@@ -168,12 +168,34 @@ FLOW_RESPONSES: dict[str, dict[int, str]] = {
 }
 
 
+SMART_RESPONSE_SYSTEM_PROMPT = """Sen bir çocuk ve ergen psikiyatrisi kliniğinin WhatsApp asistanısın.
+Hasta velileriyle yazışırsın. Görevin: kısa, net, şefkatli, klinik açıdan güvenli yanıtlar vermek.
+
+KURALLAR:
+- ASLA tanı koymazsın, ilaç dozu önermezsin, tıbbi yorum yapmazsın.
+- Cevabın TÜRKÇE ve EN FAZLA 3 CÜMLE olsun. WhatsApp mesajı gibi kısa yaz.
+- Acil durum (intihar, kendine zarar, kriz) belirtisi görürsen HEMEN 112'ye yönlendir.
+- Hasta dosyasından sadece GEREKLİ bilgiyi kullan; aileye dosya içeriğini okuma.
+- Emin değilsen "Doktora ileteceğim, kısa sürede dönüş yapacağız" de.
+- Randevu/form/ilaç soruları için somut yanıt ver; bilinmiyorsa personele yönlendir.
+- İmza: mesajın sonuna ekleme yapma, kurumsal şablon zorla kullanma.
+"""
+
+
 class ChatbotEngine:
     """WhatsApp chatbot niyet tanıma ve akış yönetimi."""
 
-    def __init__(self, config: WhatsAppConfig):
+    def __init__(
+        self,
+        config: WhatsAppConfig,
+        notion_client: Optional[Any] = None,
+        llm_config: Optional[LLMConfig] = None,
+    ):
         self.config = config
         self.conversations: dict[str, ConversationState] = {}
+        self.notion = notion_client
+        self.llm_config = llm_config
+        self._llm_client = None  # lazy init
 
     def classify_intent(self, message: str) -> IntentResult:
         """Gelen mesajın niyetini sınıflandırır."""
@@ -235,10 +257,25 @@ class ChatbotEngine:
         state.last_message_at = datetime.now()
         state.message_count += 1
 
-        # ACİL DURUM -> anında yönlendirme
+        # Hasta dosyasını yükle (Notion bağlıysa, henüz yüklenmediyse)
+        patient_context = self._load_patient_context(state)
+
+        # ACİL DURUM -> anında yönlendirme (+ doktora bildirim için log)
         if intent_result.intent == Intent.EMERGENCY:
-            logger.warning("ACİL DURUM TESPİTİ: %s (%s)", phone, message[:50])
+            logger.warning("ACİL DURUM TESPİTİ: %s (%s) hasta=%s",
+                           phone, message[:50], state.patient_name or "bilinmiyor")
             return self._handle_emergency(state)
+
+        # Akıllı LLM yanıtı (Notion + Claude varsa):
+        # UNKNOWN niyet veya düşük güven durumunda statik cevap yerine Claude kullan
+        if self._can_use_smart_response():
+            if (intent_result.intent == Intent.UNKNOWN or
+                    intent_result.confidence < self.config.chatbot_confidence_threshold):
+                smart = self._generate_smart_response(
+                    state, message, intent_result, patient_context
+                )
+                if smart:
+                    return smart
 
         # Güven skoru düşükse insana yönlendir
         if (intent_result.intent != Intent.UNKNOWN and
@@ -387,6 +424,93 @@ class ChatbotEngine:
             "4. Doktor ile görüşme\n\n"
             "Veya sorunuzu daha detaylı yazabilirsiniz."
         )
+
+    # ─────────────────── Hasta Dosyası + Akıllı Yanıt ───────────────────
+
+    def _load_patient_context(self, state: ConversationState) -> str:
+        """
+        Telefon numarasıyla Notion'dan hasta dosyasını çeker ve özet döner.
+        Konuşma durumunda cacheler (her mesajda tekrar çekmemek için).
+        """
+        if not self.notion:
+            return ""
+        cached = state.context.get("_patient_summary")
+        if cached is not None:
+            return cached
+
+        try:
+            patient = self.notion.find_patient_by_phone(state.phone)
+        except Exception as e:
+            logger.warning("Hasta arama hatası: %s", e)
+            state.context["_patient_summary"] = ""
+            return ""
+
+        if not patient:
+            state.context["_patient_summary"] = ""
+            return ""
+
+        state.patient_name = patient.name
+        summary = self.notion.get_patient_summary(patient)
+        state.context["_patient_summary"] = summary
+        return summary
+
+    def _can_use_smart_response(self) -> bool:
+        """Akıllı (LLM) yanıt kullanılabilir mi?"""
+        return bool(self.llm_config and self.llm_config.anthropic_api_key)
+
+    def _generate_smart_response(
+        self,
+        state: ConversationState,
+        message: str,
+        intent_result: "IntentResult",
+        patient_context: str,
+    ) -> Optional[str]:
+        """
+        Claude ile hasta bağlamını kullanarak akıllı yanıt üretir.
+        Hata durumunda None döner (fallback'e düşer).
+        """
+        try:
+            if self._llm_client is None:
+                import anthropic
+                self._llm_client = anthropic.Anthropic(
+                    api_key=self.llm_config.anthropic_api_key
+                )
+
+            user_prompt_parts = []
+            if patient_context:
+                user_prompt_parts.append(
+                    "HASTA DOSYASI:\n" + patient_context + "\n"
+                )
+            else:
+                user_prompt_parts.append(
+                    "NOT: Bu numara sistemde kayıtlı değil. "
+                    "Kibarca kayıt olmalarını isteyin.\n"
+                )
+
+            user_prompt_parts.append(
+                f"Tespit edilen niyet: {intent_result.intent.value} "
+                f"(güven: {intent_result.confidence:.2f})\n"
+            )
+            user_prompt_parts.append(f"VELİ MESAJI: {message}\n")
+            user_prompt_parts.append("\nLütfen kısa ve uygun bir WhatsApp yanıtı yaz.")
+
+            response = self._llm_client.messages.create(
+                model=self.llm_config.anthropic_model or "claude-sonnet-4-20250514",
+                max_tokens=400,
+                system=SMART_RESPONSE_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": "".join(user_prompt_parts)}],
+            )
+
+            text = "".join(
+                block.text for block in response.content
+                if getattr(block, "type", "") == "text"
+            ).strip()
+            return text or None
+        except Exception as e:
+            logger.warning("LLM yanıtı üretilemedi, fallback kullanılıyor: %s", e)
+            return None
+
+    # ─────────────────── Yardımcılar ───────────────────
 
     def _is_within_hours(self) -> bool:
         """Mesaj saatleri içinde mi kontrolü."""
