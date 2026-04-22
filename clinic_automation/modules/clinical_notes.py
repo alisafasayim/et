@@ -271,21 +271,9 @@ class ClinicalNoteGenerator:
 
     @staticmethod
     def _format_anamnesis(form_response: FormResponse) -> str:
-        """Form yanıtını anamnez formatına çevirir."""
-        sections = []
-        if form_response.complaint:
-            sections.append(f"BAŞVURU ŞİKAYETİ (Form): {form_response.complaint}")
-        if form_response.medical_history:
-            sections.append(f"TIBBİ GEÇMİŞ (Form): {form_response.medical_history}")
-        if form_response.family_history:
-            sections.append(f"AİLE ÖYKÜSÜ (Form): {form_response.family_history}")
-        if form_response.school_info:
-            sections.append(f"OKUL BİLGİSİ (Form): {form_response.school_info}")
-        if form_response.medications:
-            sections.append(f"KULLANDIĞI İLAÇLAR (Form): {form_response.medications}")
-        if form_response.patient_age:
-            sections.append(f"YAŞ: {form_response.patient_age}")
-
-        if sections:
-            return "ÖN BİLGİLER (Anamnez Formu):\n" + "\n".join(sections) + "\n"
-        return ""
+        """Form yanıtını anamnez formatına çevirir (tüm veriler dahil)."""
+        return (
+            "ÖN BİLGİLER (Anamnez Formu):\n"
+            + form_response.format_full_anamnesis()
+            + "\n"
+        )

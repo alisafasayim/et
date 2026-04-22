@@ -184,12 +184,18 @@ class ClinicAutomation:
         for match in match_results:
             for segment in match.patient_segments:
                 try:
-                    # Form verisi var mı kontrol et
+                    # Form verisi var mı kontrol et (çoklu form desteği)
                     form_data = None
                     try:
-                        form_data = self.forms.find_response_for_patient(
-                            segment.patient_name
-                        )
+                        form_ids = self.config.google.form_ids
+                        if form_ids:
+                            form_data = self.forms.find_response_across_forms(
+                                segment.patient_name, form_ids
+                            )
+                        elif self.config.google.form_id:
+                            form_data = self.forms.find_response_for_patient(
+                                segment.patient_name
+                            )
                     except Exception:
                         pass
 

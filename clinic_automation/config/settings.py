@@ -20,6 +20,9 @@ class GoogleConfig:
     token_path: str = os.getenv("GOOGLE_TOKEN_PATH", "token.json")
     calendar_id: str = os.getenv("GOOGLE_CALENDAR_ID", "primary")
     form_id: str = os.getenv("GOOGLE_FORM_ID", "")
+    form_ids: list = field(default_factory=lambda: [
+        fid.strip() for fid in os.getenv("GOOGLE_FORM_IDS", "").split(",") if fid.strip()
+    ])
     scopes: list = field(default_factory=lambda: [
         "https://www.googleapis.com/auth/calendar.readonly",
         "https://www.googleapis.com/auth/forms.responses.readonly",
