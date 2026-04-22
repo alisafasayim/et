@@ -220,9 +220,18 @@ class ClinicAutomation:
                         })
                         continue
 
+                    # Hasta dosyası bağlamını al (Notion'dan)
+                    patient_ctx = ""
+                    try:
+                        existing = self.notion.find_patient(segment.patient_name)
+                        if existing:
+                            patient_ctx = self.notion.get_patient_summary(existing)
+                    except Exception:
+                        pass
+
                     # Klinik not üret
                     note = self.note_generator.generate(
-                        segment, date_str, form_data
+                        segment, date_str, form_data, patient_context=patient_ctx
                     )
 
                     # Notion'a yaz - Hasta kaydı

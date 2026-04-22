@@ -301,6 +301,31 @@ class NotionClient:
         if note.additional_notes:
             sections.append(("Ek Notlar", note.additional_notes))
 
+        # Yeni yapılandırılmış alanlar
+        if note.next_appointment:
+            sections.append(("Sonraki Kontrol", note.next_appointment))
+
+        if note.family_report_requested:
+            sections.append(("Rapor Talebi", note.family_report_details or "Aile rapor talep etti."))
+
+        if note.referrals:
+            sections.append(("Yönlendirmeler", "\n".join(f"- {r}" for r in note.referrals)))
+
+        if note.current_medications:
+            med_lines = []
+            for med in note.current_medications:
+                if isinstance(med, dict):
+                    line = med.get("name", "?")
+                    if med.get("dose"):
+                        line += f" {med['dose']}"
+                    if med.get("frequency"):
+                        line += f" ({med['frequency']})"
+                    if med.get("notes"):
+                        line += f" - {med['notes']}"
+                    med_lines.append(f"- {line}")
+            if med_lines:
+                sections.append(("Mevcut İlaçlar", "\n".join(med_lines)))
+
         for title, content in sections:
             # Başlık
             blocks.append({
@@ -321,6 +346,41 @@ class NotionClient:
                 })
 
             # Bölümler arası ayırıcı
+            blocks.append({"object": "block", "type": "divider", "divider": {}})
+
+        # Aksiyon kalemleri (to_do blokları)
+        if note.action_items:
+            blocks.append({
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [{"type": "text", "text": {"content": "Aksiyonlar"}}]
+                },
+            })
+            action_type_labels = {
+                "rapor_talebi": "📋 Rapor",
+                "ilac_degisikligi": "💊 İlaç",
+                "tetkik": "🔬 Tetkik",
+                "yonlendirme": "🔄 Yönlendirme",
+                "takip": "📅 Takip",
+                "aile_gorusmesi": "👨‍👩‍👧 Aile Görüşmesi",
+                "okul_gorusmesi": "🏫 Okul Görüşmesi",
+            }
+            for item in note.action_items:
+                label = action_type_labels.get(item.action_type, item.action_type)
+                text = f"[{label}] {item.description}"
+                if item.deadline:
+                    text += f" (Süre: {item.deadline})"
+                if item.responsible:
+                    text += f" → {item.responsible}"
+                blocks.append({
+                    "object": "block",
+                    "type": "to_do",
+                    "to_do": {
+                        "rich_text": [{"type": "text", "text": {"content": text[:2000]}}],
+                        "checked": False,
+                    },
+                })
             blocks.append({"object": "block", "type": "divider", "divider": {}})
 
         return blocks
