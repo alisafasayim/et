@@ -8,10 +8,16 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
-# .env dosyasını yükle
-load_dotenv()
+# .env dosyasını clinic_automation paketinin kökünden yükle
+# (cwd'ye bakmadan, modülün kendi yerini referans al)
+_PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+_ENV_FILE = _PACKAGE_ROOT / ".env"
+if _ENV_FILE.exists():
+    load_dotenv(_ENV_FILE)
+else:
+    load_dotenv()  # fallback: cwd'de ara
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = _PACKAGE_ROOT
 
 
 @dataclass
