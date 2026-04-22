@@ -13,7 +13,7 @@ Yetenekler:
 
 import re
 import logging
-from datetime import datetime, time as dtime
+from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Any
@@ -514,7 +514,5 @@ class ChatbotEngine:
 
     def _is_within_hours(self) -> bool:
         """Mesaj saatleri içinde mi kontrolü."""
-        now = datetime.now().time()
-        start = dtime(self.config.messaging_hours_start, 0)
-        end = dtime(self.config.messaging_hours_end, 0)
-        return start <= now <= end
+        now_hour = datetime.now().hour
+        return self.config.messaging_hours_start <= now_hour <= self.config.messaging_hours_end
