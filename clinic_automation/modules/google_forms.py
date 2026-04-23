@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
+from google.oauth2 import service_account
 
 from clinic_automation.config.settings import GoogleConfig
 
@@ -222,17 +223,28 @@ class GoogleFormsClient:
         self._drive_service = None
 
     def authenticate(self) -> None:
-        """OAuth2 ile kimlik doğrulama (Calendar ile aynı token)."""
+        """Service account veya OAuth2 ile kimlik doğrulama."""
         import os
         creds = None
-        if os.path.exists(self.config.token_path):
-            creds = Credentials.from_authorized_user_file(
-                self.config.token_path, self.config.scopes
+
+        # Service account varsa öncelikli kullan
+        sa_path = self.config.service_account_path
+        if sa_path and os.path.exists(sa_path):
+            creds = service_account.Credentials.from_service_account_file(
+                sa_path, scopes=self.config.scopes
             )
-        if not creds or not creds.valid:
-            raise RuntimeError(
-                "Google token bulunamadı. Önce Calendar modülü ile authenticate edin."
-            )
+        else:
+            # Fallback: OAuth2 token
+            if os.path.exists(self.config.token_path):
+                creds = Credentials.from_authorized_user_file(
+                    self.config.token_path, self.config.scopes
+                )
+            if not creds or not creds.valid:
+                raise RuntimeError(
+                    "Google token bulunamadı. Önce Calendar modülü ile authenticate edin "
+                    "veya GOOGLE_SERVICE_ACCOUNT_PATH ayarlayın."
+                )
+
         self._service = build("forms", "v1", credentials=creds)
         self._drive_service = build("drive", "v3", credentials=creds)
         logger.info("Google Forms kimlik doğrulaması başarılı.")

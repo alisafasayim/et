@@ -24,6 +24,7 @@ BASE_DIR = _PACKAGE_ROOT
 class GoogleConfig:
     credentials_path: str = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
     token_path: str = os.getenv("GOOGLE_TOKEN_PATH", "token.json")
+    service_account_path: str = os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", "")
     calendar_id: str = os.getenv("GOOGLE_CALENDAR_ID", "primary")
     form_id: str = os.getenv("GOOGLE_FORM_ID", "")
     form_ids: list = field(default_factory=lambda: [

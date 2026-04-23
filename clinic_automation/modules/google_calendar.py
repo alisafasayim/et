@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from google.oauth2.credentials import Credentials
+from google.oauth2 import service_account
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -43,10 +44,21 @@ class GoogleCalendarClient:
         self._service = None
 
     def authenticate(self) -> None:
-        """OAuth2 ile kimlik doğrulama yapar."""
+        """Service account veya OAuth2 ile kimlik doğrulama yapar."""
+        import os
         creds = None
 
-        import os
+        # Service account varsa öncelikli kullan
+        sa_path = self.config.service_account_path
+        if sa_path and os.path.exists(sa_path):
+            creds = service_account.Credentials.from_service_account_file(
+                sa_path, scopes=self.config.scopes
+            )
+            self._service = build("calendar", "v3", credentials=creds)
+            logger.info("Google Calendar kimlik doğrulaması başarılı (service account).")
+            return
+
+        # Fallback: OAuth2
         if os.path.exists(self.config.token_path):
             creds = Credentials.from_authorized_user_file(
                 self.config.token_path, self.config.scopes
