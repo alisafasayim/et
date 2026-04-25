@@ -252,23 +252,32 @@ class NotionClient:
         note: ClinicalNote,
     ) -> str:
         """Klinik notu hasta sayfasına alt sayfa olarak ekler."""
+        # Tarih geçerli ISO formatında mı kontrol et
+        session_date = note.session_date
+        try:
+            datetime.fromisoformat(session_date)
+        except (ValueError, TypeError):
+            session_date = datetime.now().strftime("%Y-%m-%d")
+
+        properties: dict[str, Any] = {
+            "Başlık": {
+                "title": [{"text": {"content": f"Seans - {session_date} - {note.patient_name}"}}]
+            },
+            "Hasta": {
+                "relation": [{"id": patient.page_id}]
+            },
+            "Tarih": {
+                "date": {"start": session_date}
+            },
+            "Tanı": {
+                "rich_text": [{"text": {"content": note.diagnosis[:2000]}}]
+            },
+        }
+
         # Seans sayfası oluştur
         page = self.client.pages.create(
             parent={"database_id": self.config.sessions_db_id},
-            properties={
-                "Başlık": {
-                    "title": [{"text": {"content": f"Seans - {note.session_date} - {note.patient_name}"}}]
-                },
-                "Hasta": {
-                    "relation": [{"id": patient.page_id}]
-                },
-                "Tarih": {
-                    "date": {"start": note.session_date}
-                },
-                "Tanı": {
-                    "rich_text": [{"text": {"content": note.diagnosis[:2000]}}]
-                },
-            },
+            properties=properties,
         )
 
         # Sayfa içeriğini oluştur
@@ -492,6 +501,11 @@ class NotionClient:
         """Ses kaydı metadata'sını Notion'a ekler."""
         from pathlib import Path
         filename = Path(audio_path).name
+
+        try:
+            datetime.fromisoformat(session_date)
+        except (ValueError, TypeError):
+            session_date = datetime.now().strftime("%Y-%m-%d")
 
         properties: dict[str, Any] = {
             "Başlık": {"title": [{"text": {"content": f"{session_date}_{patient.name}_{filename}"}}]},
