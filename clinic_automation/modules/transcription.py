@@ -94,9 +94,9 @@ class AudioTranscriber:
         segments = []
         for seg in getattr(response, "segments", []):
             segments.append(TranscriptionSegment(
-                start=seg.get("start", 0),
-                end=seg.get("end", 0),
-                text=seg.get("text", "").strip(),
+                start=getattr(seg, "start", 0),
+                end=getattr(seg, "end", 0),
+                text=getattr(seg, "text", "").strip(),
             ))
 
         # Geçici dosyayı temizle
@@ -143,9 +143,9 @@ class AudioTranscriber:
             all_text.append(response.text)
             for seg in getattr(response, "segments", []):
                 all_segments.append(TranscriptionSegment(
-                    start=seg.get("start", 0) + time_offset,
-                    end=seg.get("end", 0) + time_offset,
-                    text=seg.get("text", "").strip(),
+                    start=getattr(seg, "start", 0) + time_offset,
+                    end=getattr(seg, "end", 0) + time_offset,
+                    text=getattr(seg, "text", "").strip(),
                 ))
 
             time_offset += chunk_length_ms / 1000.0
@@ -231,5 +231,8 @@ class AudioTranscriber:
             return []
 
         extensions = {".m4a", ".mp3", ".wav", ".ogg", ".flac"}
-        files = [f for f in audio_dir.iterdir() if f.suffix.lower() in extensions]
+        files = [
+            f for f in audio_dir.iterdir()
+            if f.suffix.lower() in extensions and "_processed" not in f.stem
+        ]
         return sorted(files, key=lambda f: f.stat().st_mtime)
