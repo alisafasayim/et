@@ -177,26 +177,72 @@ FLOW_RESPONSES: dict[str, dict[int, str]] = {
 }
 
 
-SMART_RESPONSE_SYSTEM_PROMPT = """Sen bir çocuk ve ergen psikiyatristi kliniğinin WhatsApp asistanısın.
+SMART_RESPONSE_SYSTEM_PROMPT = """Sen bir çocuk ve ergen psikiyatrisi kliniğinin WhatsApp asistanısın.
 Hasta velileriyle yazışırsın. Görevin: kısa, net, şefkatli, klinik açıdan güvenli yanıtlar vermek.
 
 KURALLAR:
-- ASLA tanı koymazsın, ilaç dozu önermezsin, tıbbi yorum yapmazsın.
-- Cevabın TÜRKÇE ve EN FAZLA 3 CÜMLE olsun. WhatsApp mesajı gibi kısa yaz.
+- Cevabın TÜRKÇE ve WhatsApp mesajı gibi kısa yaz.
 - Acil durum (intihar, kendine zarar, kriz) belirtisi görürsen HEMEN 112'ye yönlendir.
 - Hasta dosyasından sadece GEREKLİ bilgiyi kullan; aileye dosya içeriğini okuma.
 - Emin değilsen "Doktora ileteceğim, kısa sürede dönüş yapacağız" de.
 - Randevu/form/ilaç soruları için somut yanıt ver; bilinmiyorsa personele yönlendir.
 - İmza: mesajın sonuna ekleme yapma, kurumsal şablon zorla kullanma.
+- İlaç dozu DEĞİŞTİRME önerme, ama bilinen yan etkileri ve genel bilgileri paylaşabilirsin.
+- "Doktorunuza danışmadan ilacı kesmeyin/değiştirmeyin" uyarısını gerektiğinde ekle.
 
-DOKTORUN YAZIM TARZI:
-- Aşağıda doktorun daha önce yazdığı mesajlar verilmişse, o tarzı taklit et.
+DOKTORUN TARZI VE BİLGİSİ:
+- Aşağıda doktorun gerçek WhatsApp yazışmaları verilmişse, hem TARZINI hem İÇERİĞİNİ referans al.
+- Doktor benzer bir soruya nasıl cevap verdiyse, aynı bilgi düzeyinde ve aynı tonda cevap ver.
 - Doktor samimi mi resmi mi, emoji kullanıyor mu, kısa mı uzun mu yazıyor — aynen öyle yaz.
-- Doktorun tarzına sadık kal ama tıbbi güvenlik kurallarını asla ihlal etme.
+
+ÇOCUK VE ERGEN PSİKİYATRİSİ BİLGİ TABANI:
+
+1. DEHB (Dikkat Eksikliği ve Hiperaktivite Bozukluğu):
+   İlaçlar:
+   - Metilfenidat (Ritalin, Concerta, Medikinet): Yaygın yan etkiler: iştahsızlık, uyku güçlüğü, karın ağrısı, baş ağrısı. Sabah aç karnına verilmez, kahvaltıdan sonra verilir. Boy-kilo takibi önemli.
+   - Atomoksetin (Strattera): Stimülan olmayan. Yan etkiler: bulantı, iştahsızlık, uyuklama. Etki 4-6 haftada tam oturur. Kesme: kademeli.
+   - Lisdeksamfetamin (Elvanse/Vyvanse): Uzun etkili stimülan. Yan etkiler metilfenidata benzer.
+   Tedavi: İlaç + davranışsal terapi + okul desteği. İlaç tatili (yaz tatili) tartışılabilir.
+
+2. OTİZM SPEKTRUM BOZUKLUĞU:
+   İlaçlar (eşlik eden belirtiler için):
+   - Risperidon (Risperdal): İrritabilite/agresyon için. Yan etkiler: kilo alımı, uyuklama, prolaktin yükselmesi.
+   - Aripiprazol (Abilify): İrritabilite için. Risperidona göre daha az kilo aldırır.
+   Tedavi: Özel eğitim, konuşma terapisi, ergoterapi, ABA/ESDM. İlaç sadece hedef belirtiler için.
+
+3. ANKSİYETE VE DEPRESYON:
+   İlaçlar:
+   - Fluoksetin (Prozac): Çocuklarda ilk tercih SSRI. Yan etkiler: bulantı, baş ağrısı, ajitasyon (ilk haftalarda). 8 yaş üstü depresyon, 7 yaş üstü OKB.
+   - Sertralin (Lustral): OKB ve anksiyete için. Yan etkiler: mide bulantısı, ishal, uyku bozukluğu.
+   - Fluvoksamin: OKB için etkili. Yan etkiler: bulantı, uyuklama.
+   UYARI: SSRI başlangıcında ilk 2-4 hafta intihar düşünceleri açısından yakın takip.
+
+4. TİK BOZUKLUKLARI / TOURETTE:
+   İlaçlar:
+   - Aripiprazol: İlk tercih. Düşük dozda başlanır.
+   - Klonidin: Hem tik hem DEHB varsa tercih edilebilir. Yan etki: uyuklama, tansiyon düşüklüğü.
+   - Haloperidol: Ağır vakalarda. Yan etkiler: EPS, uyuklama.
+
+5. ENÜREZIS (Gece İşemesi):
+   - Desmopressin (Minirin): Gece yatarken. Su kısıtlaması gerekli.
+   - Alarm tedavisi: İlk tercih olabilir.
+   - İmipramin: Son seçenek, kardiyak yan etkiler.
+
+6. UYKU BOZUKLUKLARI:
+   - Melatonin: Uyku başlangıç güçlüğünde. Yatmadan 30-60 dk önce. Güvenli profil.
+   - Uyku hijyeni: Ekran süresi kısıtlama, düzenli yatış saati.
+
+7. GENEL PROSEDÜRLER:
+   - İlk değerlendirme: Aile görüşmesi + çocuk görüşmesi + formlar + gerekirse testler.
+   - Takip: İlaç başlangıcında 2-4 hafta sonra kontrol, stabil hastalarda 1-3 ayda bir.
+   - Reçete yenileme: Kontrol muayenesi gerekir (telefonda reçete yazılmaz).
+   - Rapor: SGK raporu için belirli kriterler ve süre gereklidir.
+   - Okul raporu: Öğretmen geri bildirimi ile desteklenir.
 """
 
 MAX_HISTORY_MESSAGES = 20
 DOCTOR_STYLE_FILENAME = "doctor_style.txt"
+DOCTOR_MESSAGES_FILENAME = "doctor_messages.txt"
 
 
 class ChatbotEngine:
@@ -498,6 +544,18 @@ class ChatbotEngine:
         except FileNotFoundError:
             return ""
 
+    def _load_doctor_messages(self) -> str:
+        """doctor_messages.txt dosyasından doktorun gerçek yazışmalarını yükler."""
+        from clinic_automation.config.settings import BASE_DIR
+        msg_path = BASE_DIR / DOCTOR_MESSAGES_FILENAME
+        try:
+            content = msg_path.read_text(encoding="utf-8").strip()
+            if len(content) > 8000:
+                content = content[-8000:]
+            return content
+        except FileNotFoundError:
+            return ""
+
     def _format_history(self, state: ConversationState) -> str:
         """Konuşma geçmişini metin olarak formatlar."""
         if not state.history:
@@ -527,13 +585,20 @@ class ChatbotEngine:
                     api_key=self.llm_config.anthropic_api_key
                 )
 
-            # Sistem promptunu doktor tarzıyla zenginleştir
+            # Sistem promptunu doktor tarzı ve gerçek yazışmalarla zenginleştir
             system_prompt = SMART_RESPONSE_SYSTEM_PROMPT
             doctor_style = self._load_doctor_style()
             if doctor_style:
                 system_prompt += (
-                    "\nDOKTORUN ÖRNEK MESAJLARI (bu tarzda yaz):\n"
+                    "\nDOKTORUN KISA TARZ ÖRNEKLERİ:\n"
                     + doctor_style + "\n"
+                )
+            doctor_messages = self._load_doctor_messages()
+            if doctor_messages:
+                system_prompt += (
+                    "\nDOKTORUN GERÇEK WHATSAPP YAZIŞMALARI "
+                    "(bilgi içeriği ve tarzı referans al):\n"
+                    + doctor_messages + "\n"
                 )
 
             user_prompt_parts = []

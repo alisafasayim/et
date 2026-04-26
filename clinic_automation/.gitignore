@@ -4,7 +4,10 @@
 .encryption_key
 token.json
 credentials.json
+service_account.json
 audit.log
+doctor_style.txt
+doctor_messages.txt
 
 # Ses dosyaları (büyük ve hassas)
 audio_files/
