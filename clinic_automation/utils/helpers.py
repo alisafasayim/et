@@ -43,6 +43,7 @@ def extract_date_from_filename(filename: str) -> Optional[datetime]:
       - 2024-03-15_Ali_Veli.m4a
       - 15.03.2024 Ali Veli.m4a
       - 20240315_session.m4a
+      - özge eylül aydoğan 16.04.m4a  (DD.MM → mevcut yıl)
       - Kayıt 003.m4a (tarih yok)
     """
     name = Path(filename).stem
@@ -67,6 +68,15 @@ def extract_date_from_filename(filename: str) -> Optional[datetime]:
             except ValueError:
                 continue
 
+    # DD.MM formatı (yılsız, mevcut yıl varsayılır)
+    short_match = re.search(r"(?<!\d)(\d{2})\.(\d{2})(?!\.\d)", name)
+    if short_match:
+        day, month = int(short_match.group(1)), int(short_match.group(2))
+        try:
+            return datetime(datetime.now().year, month, day)
+        except ValueError:
+            pass
+
     return None
 
 
@@ -78,10 +88,15 @@ def extract_name_from_filename(filename: str) -> Optional[str]:
     cleaned = re.sub(r"\d{4}[-_.]\d{2}[-_.]\d{2}", "", name)
     cleaned = re.sub(r"\d{2}[-_.]\d{2}[-_.]\d{4}", "", cleaned)
     cleaned = re.sub(r"\d{8}", "", cleaned)
+    # DD.MM kısa tarih formatı
+    cleaned = re.sub(r"(?<!\d)\d{2}\.\d{2}(?!\.\d)", "", cleaned)
     cleaned = re.sub(r"[_\-]+", " ", cleaned).strip()
 
-    # "Kayıt", "session", "part" gibi genel kelimeleri kaldır
-    noise_words = {"kayıt", "kayit", "session", "part", "ses", "record", "audio"}
+    # Genel/gürültü kelimeleri kaldır
+    noise_words = {
+        "kayıt", "kayit", "session", "part", "ses", "record", "audio",
+        "processed", "seans",
+    }
     words = [w for w in cleaned.split() if w.lower() not in noise_words]
     cleaned = " ".join(words).strip()
 
