@@ -47,6 +47,14 @@ class IntentResult:
 
 
 @dataclass
+class ChatMessage:
+    """Tek bir mesaj kaydı."""
+    role: str  # "patient" veya "doctor"
+    text: str
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
 class ConversationState:
     """Bir kullanıcı ile devam eden konuşma durumu."""
     phone: str
@@ -56,6 +64,7 @@ class ConversationState:
     context: dict = field(default_factory=dict)
     last_message_at: datetime = field(default_factory=datetime.now)
     message_count: int = 0
+    history: list[ChatMessage] = field(default_factory=list)
 
 
 # Niyet tanıma kalıpları
@@ -168,7 +177,7 @@ FLOW_RESPONSES: dict[str, dict[int, str]] = {
 }
 
 
-SMART_RESPONSE_SYSTEM_PROMPT = """Sen bir çocuk ve ergen psikiyatrisi kliniğinin WhatsApp asistanısın.
+SMART_RESPONSE_SYSTEM_PROMPT = """Sen bir çocuk ve ergen psikiyatristi kliniğinin WhatsApp asistanısın.
 Hasta velileriyle yazışırsın. Görevin: kısa, net, şefkatli, klinik açıdan güvenli yanıtlar vermek.
 
 KURALLAR:
@@ -179,7 +188,15 @@ KURALLAR:
 - Emin değilsen "Doktora ileteceğim, kısa sürede dönüş yapacağız" de.
 - Randevu/form/ilaç soruları için somut yanıt ver; bilinmiyorsa personele yönlendir.
 - İmza: mesajın sonuna ekleme yapma, kurumsal şablon zorla kullanma.
+
+DOKTORUN YAZIM TARZI:
+- Aşağıda doktorun daha önce yazdığı mesajlar verilmişse, o tarzı taklit et.
+- Doktor samimi mi resmi mi, emoji kullanıyor mu, kısa mı uzun mu yazıyor — aynen öyle yaz.
+- Doktorun tarzına sadık kal ama tıbbi güvenlik kurallarını asla ihlal etme.
 """
+
+MAX_HISTORY_MESSAGES = 20
+DOCTOR_STYLE_FILENAME = "doctor_style.txt"
 
 
 class ChatbotEngine:
@@ -257,6 +274,11 @@ class ChatbotEngine:
         state.last_message_at = datetime.now()
         state.message_count += 1
 
+        # Gelen mesajı geçmişe kaydet
+        state.history.append(ChatMessage(role="patient", text=message))
+        if len(state.history) > MAX_HISTORY_MESSAGES:
+            state.history = state.history[-MAX_HISTORY_MESSAGES:]
+
         # Hasta dosyasını yükle (Notion bağlıysa, henüz yüklenmediyse)
         patient_context = self._load_patient_context(state)
 
@@ -264,7 +286,9 @@ class ChatbotEngine:
         if intent_result.intent == Intent.EMERGENCY:
             logger.warning("ACİL DURUM TESPİTİ: %s (%s) hasta=%s",
                            phone, message[:50], state.patient_name or "bilinmiyor")
-            return self._handle_emergency(state)
+            response = self._handle_emergency(state)
+            state.history.append(ChatMessage(role="doctor", text=response))
+            return response
 
         # Akıllı LLM yanıtı (Notion + Claude varsa):
         # UNKNOWN niyet veya düşük güven durumunda statik cevap yerine Claude kullan
@@ -275,16 +299,21 @@ class ChatbotEngine:
                     state, message, intent_result, patient_context
                 )
                 if smart:
+                    state.history.append(ChatMessage(role="doctor", text=smart))
                     return smart
 
         # Güven skoru düşükse insana yönlendir
         if (intent_result.intent != Intent.UNKNOWN and
                 intent_result.confidence < self.config.chatbot_confidence_threshold):
-            return self._escalate_to_human(state, intent_result)
+            response = self._escalate_to_human(state, intent_result)
+            state.history.append(ChatMessage(role="doctor", text=response))
+            return response
 
         # Aktif bir akış varsa devam et
         if state.current_flow:
-            return self._continue_flow(state, message, intent_result)
+            response = self._continue_flow(state, message, intent_result)
+            state.history.append(ChatMessage(role="doctor", text=response))
+            return response
 
         # Niyete göre yanıt
         handlers = {
@@ -301,7 +330,9 @@ class ChatbotEngine:
         }
 
         handler = handlers.get(intent_result.intent, self._handle_unknown)
-        return handler(state, intent_result)
+        response = handler(state, intent_result)
+        state.history.append(ChatMessage(role="doctor", text=response))
+        return response
 
     def start_flow(self, phone: str, flow_name: str, context: dict) -> str:
         """Proaktif bir akış başlatır (ör: hatırlatma, form takibi)."""
@@ -458,6 +489,25 @@ class ChatbotEngine:
         """Akıllı (LLM) yanıt kullanılabilir mi?"""
         return bool(self.llm_config and self.llm_config.anthropic_api_key)
 
+    def _load_doctor_style(self) -> str:
+        """doctor_style.txt dosyasından doktorun yazış tarzını yükler."""
+        from clinic_automation.config.settings import BASE_DIR
+        style_path = BASE_DIR / DOCTOR_STYLE_FILENAME
+        try:
+            return style_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return ""
+
+    def _format_history(self, state: ConversationState) -> str:
+        """Konuşma geçmişini metin olarak formatlar."""
+        if not state.history:
+            return ""
+        lines = []
+        for msg in state.history[-10:]:
+            role_label = "VELİ" if msg.role == "patient" else "ASİSTAN"
+            lines.append(f"{role_label}: {msg.text}")
+        return "\n".join(lines)
+
     def _generate_smart_response(
         self,
         state: ConversationState,
@@ -466,7 +516,8 @@ class ChatbotEngine:
         patient_context: str,
     ) -> Optional[str]:
         """
-        Claude ile hasta bağlamını kullanarak akıllı yanıt üretir.
+        Claude ile hasta bağlamını, konuşma geçmişini ve doktor tarzını
+        kullanarak akıllı yanıt üretir.
         Hata durumunda None döner (fallback'e düşer).
         """
         try:
@@ -474,6 +525,15 @@ class ChatbotEngine:
                 import anthropic
                 self._llm_client = anthropic.Anthropic(
                     api_key=self.llm_config.anthropic_api_key
+                )
+
+            # Sistem promptunu doktor tarzıyla zenginleştir
+            system_prompt = SMART_RESPONSE_SYSTEM_PROMPT
+            doctor_style = self._load_doctor_style()
+            if doctor_style:
+                system_prompt += (
+                    "\nDOKTORUN ÖRNEK MESAJLARI (bu tarzda yaz):\n"
+                    + doctor_style + "\n"
                 )
 
             user_prompt_parts = []
@@ -487,6 +547,13 @@ class ChatbotEngine:
                     "Kibarca kayıt olmalarını isteyin.\n"
                 )
 
+            # Konuşma geçmişi
+            history_text = self._format_history(state)
+            if history_text:
+                user_prompt_parts.append(
+                    "KONUŞMA GEÇMİŞİ:\n" + history_text + "\n"
+                )
+
             user_prompt_parts.append(
                 f"Tespit edilen niyet: {intent_result.intent.value} "
                 f"(güven: {intent_result.confidence:.2f})\n"
@@ -497,7 +564,7 @@ class ChatbotEngine:
             response = self._llm_client.messages.create(
                 model=self.llm_config.anthropic_model or "claude-sonnet-4-20250514",
                 max_tokens=400,
-                system=SMART_RESPONSE_SYSTEM_PROMPT,
+                system=system_prompt,
                 messages=[{"role": "user", "content": "".join(user_prompt_parts)}],
             )
 
