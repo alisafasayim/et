@@ -96,6 +96,23 @@ class ClinicAutomation:
             console.print("[yellow]Ses dosyası bulunamadı.[/yellow]")
             return results
 
+        # Daha önce işlenmiş dosyaları atla
+        unprocessed = []
+        for af in audio_files:
+            done_marker = af.with_suffix(af.suffix + ".done")
+            if done_marker.exists():
+                logger.debug("Zaten işlenmiş, atlanıyor: %s", af.name)
+            else:
+                unprocessed.append(af)
+
+        if not unprocessed:
+            console.print("[yellow]Tüm ses dosyaları zaten işlenmiş. Yeniden işlemek için .done dosyalarını silin.[/yellow]")
+            return results
+
+        if len(unprocessed) < len(audio_files):
+            console.print(f"[dim]{len(audio_files) - len(unprocessed)} dosya zaten işlenmiş, atlanıyor.[/dim]")
+
+        audio_files = unprocessed
         console.print(f"\n[bold]{len(audio_files)} ses dosyası bulundu.[/bold]\n")
 
         # 1b. Ses ön-işleme (kalite kontrol, normalizasyon)
@@ -273,6 +290,14 @@ class ClinicAutomation:
                     self.audit.log_data_access(
                         patient.page_id, "clinical_note", "CREATE"
                     )
+
+                    # İşlenmiş olarak işaretle + geçici dosyaları temizle
+                    audio_path = Path(match.audio_path)
+                    done_marker = audio_path.with_suffix(audio_path.suffix + ".done")
+                    done_marker.touch()
+                    processed_wav = audio_path.with_stem(audio_path.stem + "_processed").with_suffix(".wav")
+                    if processed_wav.exists():
+                        processed_wav.unlink()
 
                     # Sonuç göster
                     status = "needs_review" if match.needs_review else "success"
