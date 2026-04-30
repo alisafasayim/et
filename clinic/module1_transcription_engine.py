@@ -454,17 +454,25 @@ def process_audio_file(file_path: Path, calendar_service) -> list[dict]:
     # 5. Her segment için SOAP notu
     soap_notes = []
     for seg in detected_segments:
-        # Transkriptten ilgili zaman aralığını ayıkla
-        seg_lines = [
-            line
-            for line, raw_seg in zip(
-                full_transcript.splitlines(), merged
-            )
-            if seg["transcript_start_second"]
-            <= raw_seg["start"]
-            <= seg["transcript_end_second"]
+        # İlgili transkript bloklarını doğrudan `merged` üzerinden seç.
+        # Eski yaklaşım `full_transcript.splitlines()` ile zip'liyordu —
+        # bir segmentin metni satır içeriyorsa zip kayıyor ve yanlış
+        # hastaya satır atanıyordu.
+        try:
+            start_s = float(seg["transcript_start_second"])
+            end_s = float(seg["transcript_end_second"])
+        except (KeyError, TypeError, ValueError):
+            start_s, end_s = 0.0, float("inf")
+
+        seg_blocks = [
+            raw_seg for raw_seg in merged
+            if start_s <= raw_seg["start"] <= end_s
+            or start_s <= raw_seg["end"] <= end_s
+            or (raw_seg["start"] <= start_s and raw_seg["end"] >= end_s)
         ]
-        seg_transcript = "\n".join(seg_lines) if seg_lines else full_transcript
+        seg_transcript = (
+            format_transcript_for_llm(seg_blocks) if seg_blocks else full_transcript
+        )
 
         # İlgili randevuyu bul
         appointment = next(
