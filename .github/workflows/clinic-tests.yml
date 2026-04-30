@@ -1,0 +1,48 @@
+name: clinic-tests
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "clinic/**"
+      - ".github/workflows/clinic-tests.yml"
+  pull_request:
+    paths:
+      - "clinic/**"
+      - ".github/workflows/clinic-tests.yml"
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clinic
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install lightweight test deps
+        # ML bağımlılıkları (faster-whisper, pyannote.audio) ve google-api-*
+        # CI'da gereksiz — M1 testleri importorskip ile zaten skip olur.
+        # Hızlı feedback için sadece pure-Python paketleri kuruyoruz.
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            python-dotenv \
+            tenacity \
+            requests \
+            flask \
+            pytest \
+            pytest-mock
+
+      - name: Run pytest
+        run: pytest -v
