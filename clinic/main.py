@@ -323,6 +323,13 @@ def _webhook_server():
     except Exception as exc:
         logger.warning("[Webhook] Admin paneli kayıt edilemedi: %s", exc)
 
+    # Admin Web UI
+    try:
+        from admin_ui import register as register_admin_ui
+        register_admin_ui(flask_app)
+    except Exception as exc:
+        logger.warning("[Webhook] Admin UI kayıt edilemedi: %s", exc)
+
     logger.info("[Webhook] Flask sunucusu başlatılıyor (port=%d)", WEBHOOK_LISTEN_PORT)
     flask_app.run(host="0.0.0.0", port=WEBHOOK_LISTEN_PORT, debug=False, use_reloader=False)
 
