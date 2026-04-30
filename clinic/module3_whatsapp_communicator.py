@@ -676,6 +676,26 @@ def payment_webhook():
     return jsonify({"status": "queued"}), 202
 
 
+@app.route("/webhook/calendar", methods=["POST"])
+def calendar_webhook():
+    """
+    Google Calendar Watch push bildirimi → poll_and_notify tetikler.
+    Polling'in real-time alternatifi (10 dk yerine ~saniyeler).
+
+    Doğrulama: X-Goog-Channel-Token header'ı CALENDAR_PUSH_TOKEN ile
+    eşleşmeli (set edildiyse).
+    """
+    from calendar_watch import handle_push_notification, verify_push_token
+
+    received_token = request.headers.get("X-Goog-Channel-Token", "")
+    if not verify_push_token(received_token):
+        logger.warning("Calendar webhook geçersiz token reddedildi.")
+        abort(401)
+
+    result = handle_push_notification(dict(request.headers))
+    return jsonify(result), 200
+
+
 @app.route("/webhook/whatsapp", methods=["POST"])
 def whatsapp_webhook():
     """

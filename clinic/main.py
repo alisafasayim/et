@@ -267,6 +267,15 @@ def _reminder_1h_loop():
     _reminder_loop("1h", REMINDER_1H_INTERVAL_SEC)
 
 
+def _calendar_watch_loop():
+    """
+    Calendar Watch (push) aktifse expiration yaklaşınca otomatik yeniler.
+    Push devre dışıysa loop kendini bypass eder.
+    """
+    from calendar_watch import watch_renewal_loop
+    watch_renewal_loop(check_interval_sec=3600)
+
+
 def _anamnesis_followup_loop():
     """
     İlk anamnez mesajı gönderilmiş ama hâlâ form yanıtı bulunmayan
@@ -382,6 +391,13 @@ def run_setup():
     except Exception as exc:
         logger.error("Kurulum hatası: %s", exc)
 
+    # Calendar Watch (opsiyonel)
+    try:
+        from calendar_watch import start_watch
+        start_watch()
+    except Exception as exc:
+        logger.warning("Calendar Watch başlatılamadı: %s", exc)
+
 
 # ---------------------------------------------------------------------------
 # Ana Başlatıcı
@@ -404,6 +420,7 @@ def start_clinic_system():
     thread_specs: dict[str, Callable[[], None]] = {
         "AudioLoop": _audio_inbox_loop,
         "CalendarLoop": _calendar_poll_loop,
+        "CalendarWatch": _calendar_watch_loop,
         "Reminder24h": _reminder_24h_loop,
         "Reminder1h": _reminder_1h_loop,
         "AnamnesisFollowup": _anamnesis_followup_loop,
