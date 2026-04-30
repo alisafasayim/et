@@ -57,6 +57,7 @@ from module3_whatsapp_communicator import (
     configure_instance_events,
     configure_webhook,
     get_instance_status,
+    poll_anamnesis_followup,
     poll_and_notify,
     poll_upcoming_reminders,
 )
@@ -85,6 +86,8 @@ CALENDAR_POLL_INTERVAL_SEC = int(os.getenv("CALENDAR_POLL_INTERVAL_SEC", "600"))
 # Yaklaşan randevu hatırlatma cron'ları (saniye)
 REMINDER_24H_INTERVAL_SEC = int(os.getenv("REMINDER_24H_INTERVAL_SEC", "900"))   # 15 dk
 REMINDER_1H_INTERVAL_SEC = int(os.getenv("REMINDER_1H_INTERVAL_SEC", "300"))     # 5 dk
+# Anamnez doldurmayan velilere takip mesajı (saatte bir)
+ANAMNESIS_FOLLOWUP_INTERVAL_SEC = int(os.getenv("ANAMNESIS_FOLLOWUP_INTERVAL_SEC", "3600"))
 WEBHOOK_LISTEN_PORT = int(os.getenv("WEBHOOK_LISTEN_PORT", "5055"))
 
 # ---------------------------------------------------------------------------
@@ -250,6 +253,28 @@ def _reminder_1h_loop():
     _reminder_loop("1h", REMINDER_1H_INTERVAL_SEC)
 
 
+def _anamnesis_followup_loop():
+    """
+    İlk anamnez mesajı gönderilmiş ama hâlâ form yanıtı bulunmayan
+    velilere ikinci hatırlatma gönderir. Saatte bir tarar.
+    """
+    logger.info(
+        "[AnamnesisFollowup] Başlatıldı | aralık: %ds",
+        ANAMNESIS_FOLLOWUP_INTERVAL_SEC,
+    )
+    while True:
+        try:
+            results = poll_anamnesis_followup()
+            sent = sum(1 for r in results if r.get("status") == "sent")
+            if sent:
+                logger.info(
+                    "[AnamnesisFollowup] %d takip mesajı gönderildi", sent
+                )
+        except Exception as exc:
+            logger.error("[AnamnesisFollowup] Hata: %s", exc)
+        time.sleep(ANAMNESIS_FOLLOWUP_INTERVAL_SEC)
+
+
 # ---------------------------------------------------------------------------
 # İş Parçacığı 3: Webhook Sunucusu (Modül 3 + tetikleyici)
 # ---------------------------------------------------------------------------
@@ -359,6 +384,7 @@ def start_clinic_system():
         "CalendarLoop": _calendar_poll_loop,
         "Reminder24h": _reminder_24h_loop,
         "Reminder1h": _reminder_1h_loop,
+        "AnamnesisFollowup": _anamnesis_followup_loop,
         "WebhookServer": _webhook_server,
     }
 

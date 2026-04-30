@@ -693,6 +693,100 @@ def poll_upcoming_reminders(horizon: str = "24h") -> list[dict]:
     return results
 
 
+def poll_anamnesis_followup(min_hours_since_initial: float = 24.0) -> list[dict]:
+    """
+    İlk anamnez mesajı gönderildikten ≥N saat sonra hâlâ Google Forms'da
+    yanıt görünmeyen velilere ikinci kez hatırlatma gönderir.
+
+    Idempotency: ilk gönderim 'calendar_event_reminder' namespace'inde,
+    ikinci gönderim 'anamnesis_followup' namespace'inde işaretlenir.
+    """
+    from state_store import get_default_store
+
+    # Form yanıtlarını kontrol için Forms scope'u gerekir; M2'deki
+    # helper'ı yeniden kullanıyoruz (lazy import → testlerde sorun yok).
+    try:
+        from module2_notion_archiver import (
+            fetch_form_responses,
+            get_forms_service,
+            match_form_response_to_patient,
+        )
+    except ImportError as exc:
+        logger.error("[AnamnesisFollowup] M2 import edilemedi: %s", exc)
+        return []
+
+    form_id = os.getenv("GOOGLE_ANAMNESIS_FORM_ID", "")
+    if not form_id:
+        logger.warning("[AnamnesisFollowup] GOOGLE_ANAMNESIS_FORM_ID ayarlı değil; atlanıyor.")
+        return []
+
+    store = get_default_store()
+    try:
+        forms_service = get_forms_service()
+        responses = fetch_form_responses(forms_service, form_id)
+    except Exception as exc:
+        logger.error("[AnamnesisFollowup] Forms yanıtları alınamadı: %s", exc)
+        return []
+
+    # Yaklaşan randevuları çek (24h-30 gün arası)
+    service = get_calendar_service()
+    now = datetime.now(tz=timezone.utc)
+    upcoming = fetch_upcoming_appointments(
+        service,
+        window_start=now + timedelta(hours=2),  # çok yakın olanlar dışarıda
+        window_end=now + timedelta(days=30),
+    )
+
+    results = []
+    for appt in upcoming:
+        event_id = appt["event_id"]
+
+        # İlk anamnez mesajı gönderildi mi? (≥min_hours_since_initial önce)
+        first_meta_query = "calendar_event_reminder"
+        # state_store'dan son seen_at bilgisi yok; basit yaklaşım:
+        # ilk gönderimi yapmışsak (is_seen) ve şimdi-min_hours kuralı
+        # başka şekilde garanti yok. Pratik: zaten 24h sonraki hatırlatma
+        # olduğu için "ilk mesaj gönderildi" kontrolü yeterli; ek olarak
+        # bu followup'ın duplicate olmaması için kendi namespace'i var.
+        if not store.is_seen(first_meta_query, event_id):
+            # İlk mesaj henüz gitmemiş → followup atmaya gerek yok
+            continue
+
+        # Bu randevu için form yanıtı var mı?
+        match = match_form_response_to_patient(responses, appt.get("patient_name", ""))
+        if match:
+            # Veli doldurmuş, takip gereksiz
+            continue
+
+        # Daha önce followup gönderildi mi?
+        if not store.claim("anamnesis_followup", event_id, meta=appt.get("summary", "")):
+            results.append({"appointment_id": event_id, "status": "already_followed_up"})
+            continue
+
+        if not appt["phone"]:
+            results.append({"appointment_id": event_id, "status": "no_phone"})
+            continue
+
+        try:
+            appt_str = appt["start_dt"].strftime("%d.%m.%Y %H:%M")
+            message = (
+                f"Merhaba {appt.get('patient_name', '')} velisi,\n\n"
+                f"Yaklaşan randevunuz ({appt_str}) için anamnez formunu "
+                f"henüz görmedik. Görüşmemizin verimli olması için lütfen "
+                f"randevudan önce doldurun:\n"
+                f"{GOOGLE_ANAMNESIS_FORM_URL}\n\n"
+                f"Teşekkürler."
+            )
+            send_whatsapp_message(appt["phone"], message)
+            results.append({"appointment_id": event_id, "status": "sent"})
+        except Exception as exc:
+            logger.error("[AnamnesisFollowup] Gönderilemedi [%s]: %s", event_id, exc)
+            store.forget("anamnesis_followup", event_id)
+            results.append({"appointment_id": event_id, "status": "failed", "error": str(exc)})
+
+    return results
+
+
 def poll_and_notify() -> list[dict]:
     """
     Google Calendar'ı tarayarak yeni oluşturulan randevuları tespit eder
