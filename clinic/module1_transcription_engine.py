@@ -15,6 +15,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -42,6 +43,11 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
 CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
 
+# Klinik yerel saat dilimi. Tüm randevu/kayıt karşılaştırmaları
+# bu zone'a hizalanır. Önceden naive datetime'lar UTC sayılıyordu
+# → Türkiye'deki bir randevu 3 saat kayıyordu.
+CLINIC_TZ = ZoneInfo(os.getenv("CLINIC_TZ", "Europe/Istanbul"))
+
 # Randevu eşleştirmesi için tolerans (dakika)
 APPOINTMENT_MATCH_WINDOW_MINUTES = 30
 
@@ -54,8 +60,12 @@ def get_audio_metadata(file_path: Path) -> dict:
     tag = TinyTag.get(str(file_path))
     stat = file_path.stat()
 
-    # TinyTag bazı formatlarda kayıt tarihini veremeyebilir; fallback: dosya mtime
-    recorded_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+    # mtime POSIX timestamp (UTC referanslı). Doğru çevrim için aware
+    # UTC datetime, sonra klinik yerel zone'una çevir — eşleştirmede
+    # randevular yerel TZ ile karşılaştırılır.
+    recorded_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).astimezone(
+        CLINIC_TZ
+    )
 
     return {
         "file_path": str(file_path),
@@ -86,17 +96,37 @@ def get_calendar_service():
     return build("calendar", "v3", credentials=creds)
 
 
+def _parse_calendar_dt(value: str) -> datetime:
+    """
+    Google Calendar event start/end değerini aware datetime'a çevirir.
+    All-day randevularda 'date' (YYYY-MM-DD) gelir, normalde dateTime
+    ISO with offset. Naive değerler klinik yerel TZ kabul edilir.
+    """
+    # All-day event: sadece YYYY-MM-DD
+    if "T" not in value:
+        d = datetime.fromisoformat(value)
+        return d.replace(hour=0, tzinfo=CLINIC_TZ)
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=CLINIC_TZ)
+    return dt
+
+
 def fetch_day_appointments(service, target_date: datetime) -> list[dict]:
-    """Verilen güne ait tüm takvim randevularını çeker."""
-    day_start = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = day_start + timedelta(days=1)
+    """Verilen güne (klinik yerel TZ'sinde) ait tüm randevuları çeker."""
+    # target_date naive ise yerel TZ kabul et
+    if target_date.tzinfo is None:
+        target_date = target_date.replace(tzinfo=CLINIC_TZ)
+    local = target_date.astimezone(CLINIC_TZ)
+    day_start_local = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end_local = day_start_local + timedelta(days=1)
 
     events_result = (
         service.events()
         .list(
             calendarId=GOOGLE_CALENDAR_ID,
-            timeMin=day_start.astimezone(timezone.utc).isoformat(),
-            timeMax=day_end.astimezone(timezone.utc).isoformat(),
+            timeMin=day_start_local.astimezone(timezone.utc).isoformat(),
+            timeMax=day_end_local.astimezone(timezone.utc).isoformat(),
             singleEvents=True,
             orderBy="startTime",
         )
@@ -114,7 +144,7 @@ def fetch_day_appointments(service, target_date: datetime) -> list[dict]:
                 "description": event.get("description", ""),
                 "start": start_str,
                 "end": end_str,
-                "start_dt": datetime.fromisoformat(start_str),
+                "start_dt": _parse_calendar_dt(start_str),
             }
         )
     return appointments
@@ -123,14 +153,18 @@ def fetch_day_appointments(service, target_date: datetime) -> list[dict]:
 def match_appointments(recorded_at: datetime, appointments: list[dict]) -> list[dict]:
     """
     Ses kaydının saatine yakın (±APPOINTMENT_MATCH_WINDOW_MINUTES) randevuları döner.
-    Ses kaydı birden fazla randevuyu kapsayabilir; tamamını listele.
+    Tüm karşılaştırmalar aware datetime üzerinden yapılır; recorded_at
+    naive gelirse klinik yerel TZ kabul edilir.
     """
+    if recorded_at.tzinfo is None:
+        recorded_at = recorded_at.replace(tzinfo=CLINIC_TZ)
+
     window = timedelta(minutes=APPOINTMENT_MATCH_WINDOW_MINUTES)
     matched = []
     for appt in appointments:
         appt_start = appt["start_dt"]
-        if not appt_start.tzinfo:
-            appt_start = appt_start.replace(tzinfo=timezone.utc)
+        if appt_start.tzinfo is None:
+            appt_start = appt_start.replace(tzinfo=CLINIC_TZ)
         if abs(recorded_at - appt_start) <= window:
             matched.append(appt)
     return matched
