@@ -140,12 +140,44 @@ def match_appointments(recorded_at: datetime, appointments: list[dict]) -> list[
 # 3. Transkripsiyon (faster-whisper) ve Diarization (pyannote)
 # ---------------------------------------------------------------------------
 
+# Modeller proses ömrü boyunca tek sefer yüklenir; her ses dosyasında
+# yeniden initialize etmek (faster-whisper large-v3 ~3 GB, pyannote ~500 MB)
+# I/O ve VRAM patlamasına yol açıyordu.
+_whisper_model: WhisperModel | None = None
+_diarization_pipeline: "Pipeline | None" = None
+
+
+def _get_whisper_model() -> WhisperModel:
+    global _whisper_model
+    if _whisper_model is None:
+        print(f"[Whisper] Model yükleniyor: {WHISPER_MODEL_SIZE} (ilk seferinde yavaş olabilir)")
+        _whisper_model = WhisperModel(
+            WHISPER_MODEL_SIZE, device="auto", compute_type="auto"
+        )
+    return _whisper_model
+
+
+def _get_diarization_pipeline() -> Pipeline:
+    global _diarization_pipeline
+    if _diarization_pipeline is None:
+        if not HF_TOKEN:
+            raise EnvironmentError(
+                "HF_TOKEN ayarlanmamış; pyannote/speaker-diarization-3.1 indirilemez."
+            )
+        print("[PyAnnote] Diarization pipeline yükleniyor (ilk seferinde yavaş olabilir)")
+        _diarization_pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            use_auth_token=HF_TOKEN,
+        )
+    return _diarization_pipeline
+
+
 def transcribe_audio(file_path: Path) -> list[dict]:
     """
     faster-whisper ile transkripsiyon yapar.
     Her segment için başlangıç/bitiş süresi ve metni döner.
     """
-    model = WhisperModel(WHISPER_MODEL_SIZE, device="auto", compute_type="auto")
+    model = _get_whisper_model()
     segments, info = model.transcribe(str(file_path), beam_size=5, language="tr")
 
     print(f"[Whisper] Dil: {info.language}, Olasılık: {info.language_probability:.2f}")
@@ -165,10 +197,7 @@ def diarize_audio(file_path: Path) -> list[dict]:
     pyannote.audio ile konuşmacı ayrımı (diarization) yapar.
     Her konuşma bloğu için başlangıç, bitiş ve konuşmacı etiketi döner.
     """
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        use_auth_token=HF_TOKEN,
-    )
+    pipeline = _get_diarization_pipeline()
     diarization = pipeline(str(file_path))
 
     turns = []
