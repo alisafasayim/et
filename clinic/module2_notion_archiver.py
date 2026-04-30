@@ -192,13 +192,26 @@ def create_patient_page(
 # 4. Notion Block Yardımcıları
 # ---------------------------------------------------------------------------
 
+def _rich_text(text: str) -> list[dict]:
+    """
+    Notion'da her bir text node max 2000 karakter kabul eder.
+    Uzun metni 2000'lik chunk'lara böler — eskiden text[:2000]
+    ile sessizce kırpılıyordu, anamnez/SOAP cevapları kaybediliyordu.
+    """
+    if not text:
+        return [{"type": "text", "text": {"content": "—"}}]
+    return [
+        {"type": "text", "text": {"content": text[i : i + 2000]}}
+        for i in range(0, len(text), 2000)
+    ]
+
+
 def _heading2(text: str) -> dict:
     return {
         "object": "block",
         "type": "heading_2",
-        "heading_2": {
-            "rich_text": [{"type": "text", "text": {"content": text}}]
-        },
+        # Heading'ler için 2000 karakter pratikte yeter; başlık kısa olur.
+        "heading_2": {"rich_text": _rich_text(text[:2000])},
     }
 
 
@@ -206,21 +219,15 @@ def _heading3(text: str) -> dict:
     return {
         "object": "block",
         "type": "heading_3",
-        "heading_3": {
-            "rich_text": [{"type": "text", "text": {"content": text}}]
-        },
+        "heading_3": {"rich_text": _rich_text(text[:2000])},
     }
 
 
 def _paragraph(text: str) -> dict:
-    # Notion tek seferde maksimum 2000 karakter kabul eder; uzun metni böl
-    content = text[:2000] if text else "—"
     return {
         "object": "block",
         "type": "paragraph",
-        "paragraph": {
-            "rich_text": [{"type": "text", "text": {"content": content}}]
-        },
+        "paragraph": {"rich_text": _rich_text(text)},
     }
 
 
@@ -233,7 +240,7 @@ def _callout(text: str, emoji: str = "ℹ️") -> dict:
         "object": "block",
         "type": "callout",
         "callout": {
-            "rich_text": [{"type": "text", "text": {"content": text[:2000]}}],
+            "rich_text": _rich_text(text),
             "icon": {"type": "emoji", "emoji": emoji},
         },
     }
