@@ -37,6 +37,13 @@ NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "")
 NOTION_API_VERSION = "2022-06-28"
 NOTION_BASE_URL = "https://api.notion.com/v1"
 
+# Hasta-seans hiyerarşisi: true ise hasta için DB'de TEK satır,
+# her seans kök sayfanın child page'i olarak eklenir. Geriye uyum
+# için varsayılan false → her seans yeni satır (eski davranış).
+NOTION_HIERARCHICAL_MODE = os.getenv(
+    "NOTION_HIERARCHICAL_MODE", "false"
+).lower() in ("1", "true", "yes", "on")
+
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 GOOGLE_TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 GOOGLE_FORMS_SCOPES = [
@@ -190,6 +197,102 @@ def create_patient_page(
     page_id = result["id"]
     print(f"  Notion sayfası oluşturuldu: {patient_name} → {page_id}")
     return page_id
+
+
+# ---------------------------------------------------------------------------
+# 3b. Hasta-seans hiyerarşik kayıt (NOTION_HIERARCHICAL_MODE=true)
+# ---------------------------------------------------------------------------
+
+def find_patient_root_page(patient_name: str) -> str | None:
+    """
+    Hasta için kök sayfa (DB satırı) zaten var mı? Adı tam eşleşene
+    göre arar. Bulursa page_id döner; bulamazsa None.
+    """
+    if not NOTION_DATABASE_ID:
+        raise EnvironmentError("NOTION_DATABASE_ID çevre değişkeni ayarlanmamış.")
+
+    payload = {
+        "filter": {
+            "property": "Hasta Adı",
+            "title": {"equals": patient_name},
+        },
+        "page_size": 1,
+    }
+    result = _notion_post(f"/databases/{NOTION_DATABASE_ID}/query", payload)
+    pages = result.get("results", [])
+    return pages[0]["id"] if pages else None
+
+
+def create_patient_root_page(patient_name: str) -> str:
+    """
+    Hasta için kök DB satırı oluşturur. Sadece "Hasta Adı" (title)
+    property'si zorunlu; ek property'ler (telefon, TC, vs.) kullanıcı
+    DB'de tanımlamışsa manuel doldurulur — bu fonksiyon basit tutar.
+    """
+    if not NOTION_DATABASE_ID:
+        raise EnvironmentError("NOTION_DATABASE_ID çevre değişkeni ayarlanmamış.")
+
+    payload = {
+        "parent": {"database_id": NOTION_DATABASE_ID},
+        "properties": {
+            "Hasta Adı": {
+                "title": [{"text": {"content": patient_name}}]
+            },
+        },
+    }
+    result = _notion_post("/pages", payload)
+    page_id = result["id"]
+    print(f"  Hasta kök sayfası oluşturuldu: {patient_name} → {page_id}")
+    return page_id
+
+
+def get_or_create_patient_root_page(patient_name: str) -> str:
+    """find_patient_root_page + create_patient_root_page kompozisyonu."""
+    existing = find_patient_root_page(patient_name)
+    if existing:
+        print(f"  Mevcut hasta kök sayfası bulundu: {patient_name} → {existing}")
+        return existing
+    return create_patient_root_page(patient_name)
+
+
+def create_session_subpage(
+    patient_root_id: str,
+    session_title: str,
+) -> str:
+    """
+    Hasta kök sayfasının altına bir SEANS child page'i ekler.
+    Title sayfa başlığı olur (örn: "30.04.2026 — Seans 3").
+    """
+    payload = {
+        "parent": {"page_id": patient_root_id},
+        "properties": {
+            "title": [{"text": {"content": session_title}}]
+        },
+    }
+    result = _notion_post("/pages", payload)
+    page_id = result["id"]
+    print(f"  Seans sayfası oluşturuldu: {session_title} → {page_id}")
+    return page_id
+
+
+def count_existing_session_subpages(patient_root_id: str) -> int:
+    """
+    Hasta kök sayfasının child block'ları arasında "child_page" tipinde
+    kaç adet olduğunu sayar. Yeni seans başlığını "Seans N+1" olarak
+    numaralandırmak için kullanılır.
+    """
+    try:
+        endpoint = f"/blocks/{patient_root_id}/children?page_size=100"
+        url = f"{NOTION_BASE_URL}{endpoint}"
+        resp = requests.get(url, headers=_notion_headers(), timeout=30)
+        raise_for_retry(resp)
+        blocks = resp.json().get("results", [])
+        return sum(1 for b in blocks if b.get("type") == "child_page")
+    except Exception as exc:
+        # Sayım başarısız olursa numarayı atla (başlığa "Seans" yazılır)
+        logger = __import__("logging").getLogger("notion_archiver")
+        logger.warning("Seans sayımı yapılamadı: %s", exc)
+        return -1
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +472,86 @@ def append_soap_to_page(page_id: str, soap_note: dict) -> None:
 # 7. Ana Orkestratör
 # ---------------------------------------------------------------------------
 
+def _resolve_appointment_date(soap_note: dict) -> str:
+    """
+    Randevu tarihi sırasıyla şu kaynaklardan alınır:
+      1. soap_note["appointment_start"]  → M1'in Calendar'dan aldığı gerçek değer
+      2. soap_note["generated_at"]       → fallback (SOAP üretim zamanı)
+      3. datetime.now()                  → son çare
+    Önceki sürüm sadece (2)'yi kullanıyordu → klinik kayıtta yanlış tarih.
+    """
+    raw = (
+        soap_note.get("appointment_start")
+        or soap_note.get("generated_at")
+        or datetime.now().isoformat()
+    )
+    return raw[:10]  # YYYY-MM-DD
+
+
+def _archive_flat(
+    soap_note: dict,
+    form_response: dict | None,
+) -> str:
+    """Eski davranış: her seans yeni DB satırı."""
+    patient_name = soap_note.get("patient_name", "Bilinmeyen Hasta")
+    appointment_id = soap_note.get("appointment_id", "unknown")
+    appointment_date = _resolve_appointment_date(soap_note)
+
+    page_id = create_patient_page(patient_name, appointment_date, appointment_id)
+    append_anamnesis_to_page(page_id, form_response)
+    append_soap_to_page(page_id, soap_note)
+    return page_id
+
+
+def _archive_hierarchical(
+    soap_note: dict,
+    form_response: dict | None,
+) -> str:
+    """
+    NOTION_HIERARCHICAL_MODE=true: hasta için TEK kök sayfa (DB satırı),
+    her seans bu kökün altında child page olarak. Yıl-ay-gün ve seans
+    numarası ile başlıklandırılır.
+
+    İlk seansta anamnez kök sayfaya bir kez yazılır; sonraki seanslar
+    sadece SOAP içerir (anamnez tekrar tekrar dolup taşmasın).
+    """
+    patient_name = soap_note.get("patient_name", "Bilinmeyen Hasta")
+    appointment_date = _resolve_appointment_date(soap_note)
+
+    print(f"\nArşivleniyor (hiyerarşik): {patient_name}")
+
+    # 1. Hasta kök sayfası
+    root_id = get_or_create_patient_root_page(patient_name)
+
+    # 2. Anamnez yalnızca ilk seansta kök sayfaya eklenir
+    existing_count = count_existing_session_subpages(root_id)
+    if existing_count == 0 and form_response:
+        # İlk seans → anamnezi kök sayfaya bas
+        append_anamnesis_to_page(root_id, form_response)
+    elif existing_count == 0 and not form_response:
+        # Yine de bilgilendirici callout
+        _append_blocks(root_id, [
+            _heading2("📋 Anamnez Formu"),
+            _callout("Bu hasta için doldurulmuş anamnez formu bulunamadı.", "⚠️"),
+        ])
+
+    # 3. Seans numaralandırma (mevcut child_page sayısı + 1)
+    session_no = (existing_count + 1) if existing_count >= 0 else 0
+    title_parts = [appointment_date]
+    if session_no > 0:
+        title_parts.append(f"Seans {session_no}")
+    session_title = " — ".join(title_parts)
+
+    # 4. Seans child page'ini oluştur, SOAP'ı içine yaz
+    session_id = create_session_subpage(root_id, session_title)
+    append_soap_to_page(session_id, soap_note)
+
+    print(f"  Tamamlandı → Notion session_page_id: {session_id} (kök: {root_id})")
+    # Caller için: yeni oluşturulan SEANS sayfasının id'sini döndürürüz
+    # (eski API ile uyumlu, "yeni eklenen kayıt" mantığı korunur).
+    return session_id
+
+
 def archive_patient_session(
     soap_note: dict,
     form_id: str,
@@ -376,54 +559,25 @@ def archive_patient_session(
     all_form_responses: list[dict] | None = None,
 ) -> str:
     """
-    Tek bir hasta seansını Notion'a arşivler:
-      1. Hasta sayfası oluştur
-      2. Anamnez formunu ekle
-      3. SOAP notunu ekle
+    Tek bir hasta seansını Notion'a arşivler.
 
-    Parametre olarak önceden çekilmiş form yanıtları verilebilir
-    (aynı form için tekrar API çağrısı yapmamak için).
+    NOTION_HIERARCHICAL_MODE=false (varsayılan): her seans yeni DB satırı.
+    NOTION_HIERARCHICAL_MODE=true: hasta için tek kök, seanslar child page.
 
-    Döner: Oluşturulan Notion page_id
+    Döner: Oluşturulan / kullanılan Notion page_id (seans sayfası).
     """
     patient_name = soap_note.get("patient_name", "Bilinmeyen Hasta")
-    appointment_id = soap_note.get("appointment_id", "unknown")
 
-    # Randevu tarihi sırasıyla şu kaynaklardan alınır:
-    #   1. soap_note["appointment_start"]  → M1'in Calendar'dan aldığı gerçek değer
-    #   2. soap_note["generated_at"]       → fallback (SOAP üretim zamanı)
-    #   3. datetime.now()                  → son çare
-    # Önceki sürüm sadece (2)'yi kullanıyordu; bu, klinik kayıtta randevu
-    # tarihi yerine SOAP üretim zamanını yazıyordu (saatler/günler farkedebilir).
-    appointment_start_raw = (
-        soap_note.get("appointment_start")
-        or soap_note.get("generated_at")
-        or datetime.now().isoformat()
-    )
-    # Sadece YYYY-MM-DD kısmını al
-    appointment_date = appointment_start_raw[:10]
-
-    print(f"\nArşivleniyor: {patient_name}")
-
-    # 1. Notion sayfası oluştur
-    page_id = create_patient_page(patient_name, appointment_date, appointment_id)
-
-    # 2. Form yanıtlarını çek / kullan
+    # Form yanıtını bir kez çöz
     if all_form_responses is None and forms_service and form_id:
         all_form_responses = fetch_form_responses(forms_service, form_id)
-
     form_response = None
     if all_form_responses:
         form_response = match_form_response_to_patient(all_form_responses, patient_name)
 
-    # 3. Anamnezi sayfaya bas
-    append_anamnesis_to_page(page_id, form_response)
-
-    # 4. SOAP'ı sayfaya bas
-    append_soap_to_page(page_id, soap_note)
-
-    print(f"  Tamamlandı → Notion page_id: {page_id}")
-    return page_id
+    if NOTION_HIERARCHICAL_MODE:
+        return _archive_hierarchical(soap_note, form_response)
+    return _archive_flat(soap_note, form_response)
 
 
 def archive_all_soap_files(
