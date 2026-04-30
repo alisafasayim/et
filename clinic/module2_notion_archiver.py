@@ -378,10 +378,19 @@ def archive_patient_session(
     patient_name = soap_note.get("patient_name", "Bilinmeyen Hasta")
     appointment_id = soap_note.get("appointment_id", "unknown")
 
-    # Randevu tarihini SOAP'tan al; yoksa bugün
-    appointment_date = (
-        soap_note.get("generated_at", datetime.now().isoformat())[:10]
+    # Randevu tarihi sırasıyla şu kaynaklardan alınır:
+    #   1. soap_note["appointment_start"]  → M1'in Calendar'dan aldığı gerçek değer
+    #   2. soap_note["generated_at"]       → fallback (SOAP üretim zamanı)
+    #   3. datetime.now()                  → son çare
+    # Önceki sürüm sadece (2)'yi kullanıyordu; bu, klinik kayıtta randevu
+    # tarihi yerine SOAP üretim zamanını yazıyordu (saatler/günler farkedebilir).
+    appointment_start_raw = (
+        soap_note.get("appointment_start")
+        or soap_note.get("generated_at")
+        or datetime.now().isoformat()
     )
+    # Sadece YYYY-MM-DD kısmını al
+    appointment_date = appointment_start_raw[:10]
 
     print(f"\nArşivleniyor: {patient_name}")
 

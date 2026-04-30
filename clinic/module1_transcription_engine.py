@@ -368,17 +368,23 @@ def generate_soap_note(
     patient_name: str,
     appointment_id: str,
     appointment_summary: str,
+    appointment_start: str = "",
 ) -> dict:
     """
     Ollama üzerinden lokal LLM'e transkript segmenti göndererek
     SOAP formatında klinik not üretir.
+
+    appointment_start: Randevunun gerçek başlangıç ISO zamanı.
+    LLM'in echo'suna güvenmek yerine bu değer post-process olarak
+    SOAP JSON'una yazılır (Notion'da "Randevu Tarihi" sütunu için).
     """
+    generated_at = datetime.now(tz=timezone.utc).isoformat()
     prompt = SOAP_PROMPT.format(
         patient_name=patient_name,
         appointment_id=appointment_id,
         appointment_summary=appointment_summary,
         transcript=transcript_segment,
-        generated_at=datetime.now().isoformat(),
+        generated_at=generated_at,
     )
 
     response = ollama.chat(
@@ -392,7 +398,17 @@ def generate_soap_note(
     if not json_match:
         raise ValueError(f"LLM geçerli JSON döndürmedi:\n{raw}")
 
-    return json.loads(json_match.group())
+    soap = json.loads(json_match.group())
+
+    # Güvenilir metadata'yı LLM'in çıktısının üzerine yaz; LLM bazen
+    # alanları boş/yanlış echo ediyor.
+    soap["patient_name"] = patient_name
+    soap["appointment_id"] = appointment_id
+    soap["appointment_summary"] = appointment_summary
+    soap["appointment_start"] = appointment_start
+    soap["generated_at"] = generated_at
+
+    return soap
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +469,7 @@ def process_audio_file(file_path: Path, calendar_service) -> list[dict]:
         # İlgili randevuyu bul
         appointment = next(
             (a for a in matched if a["event_id"] == seg.get("appointment_id")),
-            {"event_id": seg.get("appointment_id", "unknown"), "summary": ""},
+            {"event_id": seg.get("appointment_id", "unknown"), "summary": "", "start": ""},
         )
 
         print(f"  SOAP üretiliyor: {seg.get('patient_name', 'unknown')}")
@@ -462,6 +478,7 @@ def process_audio_file(file_path: Path, calendar_service) -> list[dict]:
             patient_name=seg.get("patient_name", "unknown"),
             appointment_id=appointment["event_id"],
             appointment_summary=appointment.get("summary", ""),
+            appointment_start=appointment.get("start", ""),
         )
         soap_notes.append(soap)
 
