@@ -88,6 +88,7 @@ def test_session_numbering(m2):
     for count, expected_label in cases:
         with patch.object(m2, "find_patient_root_page", return_value="root-1"), \
              patch.object(m2, "count_existing_session_subpages", return_value=count), \
+             patch.object(m2, "_append_blocks"), \
              patch.object(m2, "append_anamnesis_to_page"), \
              patch.object(m2, "create_session_subpage", return_value="sess-x") as create_mock, \
              patch.object(m2, "append_soap_to_page"):

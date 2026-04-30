@@ -44,6 +44,14 @@ NOTION_HIERARCHICAL_MODE = os.getenv(
     "NOTION_HIERARCHICAL_MODE", "false"
 ).lower() in ("1", "true", "yes", "on")
 
+# KVKK hibrit mod: aktifse Notion'a hasta adı/TCKN ASLA yazılmaz.
+# Hasta sayfa başlığı pseudonym (#a4f9-c2b1) olur, içerikte ad/TC
+# pseudonym ile değiştirilir. Tanımlayıcılar yalnızca yerel
+# patient_registry'de (Türkiye'de) tutulur.
+KVKK_HYBRID_MODE = os.getenv(
+    "KVKK_HYBRID_MODE", "false"
+).lower() in ("1", "true", "yes", "on")
+
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 GOOGLE_TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 GOOGLE_FORMS_SCOPES = [
@@ -493,14 +501,161 @@ def _archive_flat(
     form_response: dict | None,
 ) -> str:
     """Eski davranış: her seans yeni DB satırı."""
-    patient_name = soap_note.get("patient_name", "Bilinmeyen Hasta")
+    real_patient_name = soap_note.get("patient_name", "Bilinmeyen Hasta")
     appointment_id = soap_note.get("appointment_id", "unknown")
     appointment_date = _resolve_appointment_date(soap_note)
 
-    page_id = create_patient_page(patient_name, appointment_date, appointment_id)
+    if KVKK_HYBRID_MODE:
+        # Flat + hibrit: her seans için yeni satır ama pseudonym ile
+        from patient_registry import get_default_registry
+        from pii_crypto import short_pseudonym
+
+        registry = get_default_registry()
+        existing = registry.find_by_name(real_patient_name)
+        if existing:
+            patient_uuid = existing[0]["uuid"]
+        else:
+            patient_uuid = registry.create_patient(full_name=real_patient_name)
+        display_name = short_pseudonym(patient_uuid)
+        soap_note = _scrub_soap_pii(soap_note, real_patient_name, display_name)
+        if form_response:
+            form_response = _scrub_form_pii(form_response, real_patient_name, display_name)
+    else:
+        display_name = real_patient_name
+
+    page_id = create_patient_page(display_name, appointment_date, appointment_id)
     append_anamnesis_to_page(page_id, form_response)
     append_soap_to_page(page_id, soap_note)
     return page_id
+
+
+def _scrub_soap_pii(
+    soap_note: dict,
+    real_name: str,
+    pseudonym: str,
+) -> dict:
+    """
+    SOAP içindeki tüm metin alanlarında hasta adının geçtiği yerleri
+    pseudonym ile değiştirir. Telefon ve TCKN'yi de logging_setup'taki
+    redact_pii ile yıkar. Defansif kopyalama: orijinal soap_note
+    bozulmaz.
+
+    NOT: Bu yalnızca KESİN tanımlayıcıları temizler; LLM'in ürettiği
+    metinde dolaylı tanımlayıcılar (okul adı, mahalle vs.) varsa
+    onlar yakalanmaz. K-anonimite garantisi DEĞİLDİR; KVKK gözünde
+    "kişiyi makul ölçüde belirleyemeyecek anonim hale getirilmiş
+    veri" hedeflenir, mutlak anonimleştirme değil.
+    """
+    import copy
+
+    from logging_setup import redact_pii
+
+    scrubbed = copy.deepcopy(soap_note)
+    scrubbed["patient_name"] = pseudonym
+
+    soap = scrubbed.get("soap", {})
+    patterns = _build_name_patterns(real_name, pseudonym)
+    for section in ("subjective", "objective", "assessment", "plan"):
+        section_dict = soap.get(section, {}) or {}
+        for k, v in list(section_dict.items()):
+            if not isinstance(v, str) or not v:
+                continue
+            v = _apply_name_patterns(v, patterns, pseudonym)
+            v = redact_pii(v)
+            section_dict[k] = v
+    return scrubbed
+
+
+def _scrub_form_pii(
+    form_response: dict,
+    real_name: str,
+    pseudonym: str,
+) -> dict:
+    """Anamnez form yanıtlarında hasta adı + PII yıkama."""
+    import copy
+
+    from logging_setup import redact_pii
+
+    scrubbed = copy.deepcopy(form_response)
+    patterns = _build_name_patterns(real_name, pseudonym)
+
+    answers = scrubbed.get("answers", {})
+    for q, a in list(answers.items()):
+        if not isinstance(a, str) or not a:
+            continue
+        a = _apply_name_patterns(a, patterns, pseudonym)
+        a = redact_pii(a)
+        answers[q] = a
+    return scrubbed
+
+
+# Hasta adı pattern'leri:
+#   1. Tam ad ("Ali Yıldız Demir")
+#   2. Her ad parçası ≥4 karakter ("Yıldız", "Demir") — kısa adlar
+#      (Ali, Eda) yaygın olduğundan atlanır; aksi halde false
+#      positive (örn: "Ali Baba kuyruklu yıldız" cümlesi).
+def _build_name_patterns(real_name: str, pseudonym: str) -> list:
+    import re
+    if not real_name:
+        return []
+    patterns = [(re.compile(re.escape(real_name), re.IGNORECASE), pseudonym)]
+    parts = [p for p in real_name.split() if len(p) >= 4]
+    for p in parts:
+        # \b kelime sınırı; "Yıldızlar" gibi türevleri yakalamasın
+        patterns.append((re.compile(rf"\b{re.escape(p)}\b", re.IGNORECASE), pseudonym))
+    return patterns
+
+
+def _apply_name_patterns(text: str, patterns: list, pseudonym: str) -> str:
+    for pat, replacement in patterns:
+        text = pat.sub(replacement, text)
+    return text
+
+
+def _resolve_patient_root(real_patient_name: str) -> tuple[str, str]:
+    """
+    KVKK_HYBRID_MODE'a göre kök sayfa ve Notion'a YAZILACAK adı çözer.
+
+    Döner: (notion_root_page_id, display_name_for_notion)
+        - hibrit aktif: display = pseudonym (#a4f9-c2b1)
+        - hibrit pasif: display = gerçek hasta adı (eski davranış)
+
+    Hibrit mod'da yerel patient_registry'den UUID bulunur veya oluşturulur;
+    Notion kök sayfası registry'de cached ise yeniden kullanılır,
+    aksi halde yeni oluşturulur ve registry'ye bağlanır.
+    """
+    if not KVKK_HYBRID_MODE:
+        # Eski davranış: gerçek isimle Notion'a yaz
+        return get_or_create_patient_root_page(real_patient_name), real_patient_name
+
+    # Hibrit mod: tüm PII yerelde kalır
+    from patient_registry import get_default_registry
+    from pii_crypto import short_pseudonym
+
+    registry = get_default_registry()
+    matches = registry.find_by_name(real_patient_name)
+    if matches:
+        if len(matches) > 1:
+            # Aynı isimli birden fazla — manuel disambiguation gerekebilir.
+            # Şimdilik en yenisini al; admin paneli üzerinden düzeltilebilir.
+            patient = matches[0]
+        else:
+            patient = matches[0]
+        patient_uuid = patient["uuid"]
+        existing_notion = patient.get("notion_page_id") or ""
+    else:
+        patient_uuid = registry.create_patient(full_name=real_patient_name)
+        existing_notion = ""
+
+    pseudonym = short_pseudonym(patient_uuid)
+
+    if existing_notion:
+        return existing_notion, pseudonym
+
+    # Notion kök sayfasını pseudonym ile oluştur
+    root_id = create_patient_root_page(pseudonym)
+    registry.attach_notion_page(patient_uuid, root_id)
+    return root_id, pseudonym
 
 
 def _archive_hierarchical(
@@ -509,19 +664,28 @@ def _archive_hierarchical(
 ) -> str:
     """
     NOTION_HIERARCHICAL_MODE=true: hasta için TEK kök sayfa (DB satırı),
-    her seans bu kökün altında child page olarak. Yıl-ay-gün ve seans
-    numarası ile başlıklandırılır.
+    her seans bu kökün altında child page olarak.
+
+    KVKK_HYBRID_MODE=true: Notion'a yazılan tüm metinde hasta adı
+    pseudonym (#a4f9-c2b1) ile değiştirilir; gerçek ad yalnızca
+    yerel patient_registry'de.
 
     İlk seansta anamnez kök sayfaya bir kez yazılır; sonraki seanslar
-    sadece SOAP içerir (anamnez tekrar tekrar dolup taşmasın).
+    sadece SOAP içerir.
     """
-    patient_name = soap_note.get("patient_name", "Bilinmeyen Hasta")
+    real_patient_name = soap_note.get("patient_name", "Bilinmeyen Hasta")
     appointment_date = _resolve_appointment_date(soap_note)
 
-    print(f"\nArşivleniyor (hiyerarşik): {patient_name}")
+    print(f"\nArşivleniyor (hiyerarşik): {real_patient_name}")
 
-    # 1. Hasta kök sayfası
-    root_id = get_or_create_patient_root_page(patient_name)
+    # 1. Hasta kök sayfası + Notion'a görünecek ad
+    root_id, display_name = _resolve_patient_root(real_patient_name)
+
+    # 2. SOAP içeriğindeki PII'yi pseudonym ile değiştir (yalnızca hibrit mod)
+    if KVKK_HYBRID_MODE:
+        soap_note = _scrub_soap_pii(soap_note, real_patient_name, display_name)
+        if form_response:
+            form_response = _scrub_form_pii(form_response, real_patient_name, display_name)
 
     # 2. Anamnez yalnızca ilk seansta kök sayfaya eklenir
     existing_count = count_existing_session_subpages(root_id)

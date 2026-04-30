@@ -40,13 +40,17 @@ from pii_crypto import decrypt, encrypt, pseudo_hash, short_pseudonym
 
 logger = logging.getLogger("patient_registry")
 
-DEFAULT_DB_PATH = Path(os.getenv("PATIENT_REGISTRY_DB", "./patient_registry.db"))
+def _default_db_path() -> Path:
+    """Env her seferinde okunur — test'lerde fixture sırası önemli olmasın."""
+    return Path(os.getenv("PATIENT_REGISTRY_DB", "./patient_registry.db"))
 
 
 class PatientRegistry:
     """Thread-safe SQLite hasta deposu."""
 
-    def __init__(self, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+    def __init__(self, db_path: Path | str | None = None) -> None:
+        if db_path is None:
+            db_path = _default_db_path()
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()

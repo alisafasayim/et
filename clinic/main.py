@@ -42,11 +42,11 @@ load_dotenv()
 # Modül içe aktarımları
 # ---------------------------------------------------------------------------
 
-from module1_transcription_engine import (
-    AUDIO_INBOX_DIR,
-    get_calendar_service as get_calendar_service_m1,
-    process_audio_file,
-)
+# Modül 1 (faster-whisper, pyannote, ollama) ağır ML bağımlılıkları
+# içeriyor; main.py CLI veya admin/payment testlerinde de import
+# edildiğinde gereksiz yere bunları zorunlu kılıyordu. AudioLoop
+# çalıştırıldığında lazy import ediyoruz.
+
 from module2_notion_archiver import (
     archive_patient_session,
     fetch_form_responses,
@@ -65,7 +65,8 @@ from module4_esmm_generator import (
     CollectionRecord,
     process_collection,
 )
-from module5_migration import migrate_directory
+# M5 (python-docx) sadece --migrate CLI'da kullanılır; lazy import
+# ile webhook server / admin testlerini bağımlı bırakmıyoruz.
 
 # ---------------------------------------------------------------------------
 # Loglama (rotation + PII maskeleme)
@@ -106,6 +107,13 @@ def _audio_inbox_loop():
     işlenmez — başka bir hasta için duplicate Notion sayfası
     oluşmasını engeller.
     """
+    # M1 lazy import — ağır ML bağımlılıkları yalnızca AudioLoop
+    # gerçekten başlatıldığında yüklenir.
+    from module1_transcription_engine import (
+        AUDIO_INBOX_DIR,
+        get_calendar_service as get_calendar_service_m1,
+        process_audio_file,
+    )
     from state_store import file_sha256, get_default_store
 
     store = get_default_store()
@@ -489,6 +497,7 @@ Modlar:
 
     if args.migrate:
         ext = ["docx", "md"] if args.ext == "both" else [args.ext]
+        from module5_migration import migrate_directory
         migrate_directory(source_dir=args.dir, extensions=ext, dry_run=args.dry_run)
 
     elif args.webhook_only:
