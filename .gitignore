@@ -29,6 +29,13 @@ clinic/credentials.json
 clinic/token.json
 clinic/*.soap.json
 
+# Runtime artifact'ler — test cwd'sine bağlı olarak repo kökünde
+# de oluşabilir; generic pattern ile her yerde yoksay.
+*.log
+*.db
+*.db-wal
+*.db-shm
+
 # OS
 .DS_Store
 Thumbs.db
