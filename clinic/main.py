@@ -192,7 +192,7 @@ def trigger_esmm(
     patient_name: str,
     guardian_phone: str,
     tax_id: str,
-    amount: float,
+    amount,  # Decimal | float | int | str — CollectionRecord.__post_init__ Decimal'a çevirir
     description: str = "Çocuk ve Ergen Psikiyatrisi Muayenesi",
     appointment_date: str = "",
 ) -> dict:

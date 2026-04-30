@@ -22,7 +22,8 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Optional, Union
 
 from dotenv import load_dotenv
 
@@ -57,6 +58,37 @@ JOB_POLL_INTERVAL_SEC = int(os.getenv("JOB_POLL_INTERVAL_SEC", "8"))
 JOB_POLL_MAX_RETRIES = int(os.getenv("JOB_POLL_MAX_RETRIES", "30"))
 
 # ---------------------------------------------------------------------------
+# Vergi oranları (mali müşavirle teyit edilmesi zorunlu — varsayılanlar
+# Türkiye'de serbest meslek erbabı doktor için yaygın değerler:
+#   - KDV: psikiyatri muayenesi KDV'den muaf (%0). Genel SMM'de %10/20 olabilir.
+#   - Gelir vergisi stopajı: %20 (193 sayılı GVK m.94)
+# Önceki sürüm her ikisini sıfır yazıyordu → düşük vergi kesimi → mali risk.
+# ---------------------------------------------------------------------------
+
+def _decimal_env(name: str, default: str) -> Decimal:
+    raw = os.getenv(name, default).strip().replace(",", ".")
+    return Decimal(raw)
+
+
+VAT_RATE = _decimal_env("VAT_RATE", "0")              # KDV oranı (%)
+WITHHOLDING_RATE = _decimal_env("WITHHOLDING_RATE", "20")  # Gelir vergisi stopajı (%)
+VAT_WITHHOLDING_RATE = _decimal_env("VAT_WITHHOLDING_RATE", "0")  # KDV tevkifatı (%)
+
+# Para birimi yuvarlama yardımcısı (kuruş hassasiyeti)
+MONEY_QUANT = Decimal("0.01")
+
+
+def _to_money(value: Union[Decimal, float, int, str]) -> Decimal:
+    """Float girdileri güvenli biçimde Decimal'a çevirir, 2 hane yuvarlar."""
+    if isinstance(value, Decimal):
+        amount = value
+    else:
+        # str() float'ın repr'ini koruyarak Decimal'e geçer; binary float
+        # sapmasını minimize eder.
+        amount = Decimal(str(value))
+    return amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+# ---------------------------------------------------------------------------
 # Veri Yapıları
 # ---------------------------------------------------------------------------
 
@@ -72,11 +104,16 @@ class CollectionRecord:
     """Tahsilat kaydı — dışarıdan tetikleyici bu nesneyi sağlar."""
     patient_name: str
     guardian_phone: str
-    tax_id: str           # VKN (10 hane) veya TCKN (11 hane)
-    amount: float         # TL cinsinden tutar
-    description: str      # SMM açıklaması, örn: "Psikiyatri Muayenesi"
-    appointment_date: str # ISO format: "2026-04-01"
-    contact_id: Optional[str] = None  # Paraşüt contact_id (varsa önceden biliniyorsa)
+    tax_id: str                       # VKN (10 hane) veya TCKN (11 hane)
+    # Para tutarı: float kabul edilir ama dahilde Decimal'a çevrilir
+    # (kuruş hassasiyeti için). __post_init__ ile normalize edilir.
+    amount: Union[Decimal, float, int, str]
+    description: str                  # SMM açıklaması
+    appointment_date: str             # ISO format: "2026-04-01"
+    contact_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.amount = _to_money(self.amount)
 
 
 # ---------------------------------------------------------------------------
@@ -221,20 +258,27 @@ def create_esmm(record: CollectionRecord, contact_id: str) -> str:
     """
     issue_date = record.appointment_date or datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
 
+    # Decimal değerleri JSON'a string olarak gönderiyoruz; Paraşüt API
+    # numeric string kabul eder ve float yuvarlama hatasından kaçınılır.
+    unit_price_str = str(_to_money(record.amount))
+    vat_rate_str = str(VAT_RATE)
+    withholding_rate_str = str(WITHHOLDING_RATE)
+    vat_withholding_rate_str = str(VAT_WITHHOLDING_RATE)
+
     payload = {
         "data": {
             "type": "sales_invoices",
             "attributes": {
-                "item_type": "invoice",           # e-SMM türü
+                "item_type": "invoice",
                 "description": record.description,
                 "issue_date": issue_date,
                 "due_date": issue_date,
                 "invoice_series": "SMM",
-                "invoice_id": 0,                  # Paraşüt otomatik atar
+                "invoice_id": 0,
                 "currency": "TRL",
                 "exchange_rate": 1,
-                "withholding_rate": 0,
-                "vat_withholding_rate": 0,
+                "withholding_rate": withholding_rate_str,
+                "vat_withholding_rate": vat_withholding_rate_str,
                 "invoice_discount_type": "percentage",
                 "invoice_discount": 0,
                 "billing_address": "",
@@ -244,7 +288,7 @@ def create_esmm(record: CollectionRecord, contact_id: str) -> str:
                 "tax_number": record.tax_id,
                 "country": "Turkey",
                 "is_abroad": False,
-                "e_invoice": False,    # e-SMM → False (e-Fatura değil)
+                "e_invoice": False,
                 "e_archive": False,
                 "e_smm": True,
             },
@@ -258,8 +302,8 @@ def create_esmm(record: CollectionRecord, contact_id: str) -> str:
                             "type": "sales_invoice_details",
                             "attributes": {
                                 "quantity": 1,
-                                "unit_price": record.amount,
-                                "vat_rate": 0,       # Psikiyatri muayenesi KDV'den muaf
+                                "unit_price": unit_price_str,
+                                "vat_rate": vat_rate_str,
                                 "discount_type": "percentage",
                                 "discount_value": 0,
                                 "description": record.description,
@@ -278,6 +322,10 @@ def create_esmm(record: CollectionRecord, contact_id: str) -> str:
             },
         }
     }
+    logger.info(
+        "e-SMM payload | tutar: %s TL | KDV: %%%s | stopaj: %%%s | KDV tevk.: %%%s",
+        unit_price_str, vat_rate_str, withholding_rate_str, vat_withholding_rate_str,
+    )
 
     resp = requests.post(
         _api_url("/sales_invoices"),
@@ -439,7 +487,7 @@ def process_collection(record: CollectionRecord) -> dict:
 
     Döner: {'invoice_id', 'pdf_url', 'whatsapp_status'}
     """
-    logger.info("Tahsilat işleniyor: %s | %.2f TL", record.patient_name, record.amount)
+    logger.info("Tahsilat işleniyor: %s | %s TL", record.patient_name, record.amount)
 
     # 1. Mükellef kontrolü
     is_taxpayer = is_e_invoice_taxpayer(record.tax_id)
@@ -503,7 +551,7 @@ if __name__ == "__main__":
     parser.add_argument("--patient-name", required=True)
     parser.add_argument("--phone", required=True, help="Veli WhatsApp numarası")
     parser.add_argument("--tax-id", required=True, help="VKN (10) veya TCKN (11)")
-    parser.add_argument("--amount", required=True, type=float, help="Tahsilat tutarı (TL)")
+    parser.add_argument("--amount", required=True, type=str, help="Tahsilat tutarı (TL, örn: 1500.00)")
     parser.add_argument("--description", default="Çocuk ve Ergen Psikiyatrisi Muayenesi")
     parser.add_argument(
         "--date",
