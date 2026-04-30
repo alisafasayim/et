@@ -148,6 +148,21 @@ def _audio_inbox_loop():
                 # Modül 2: Her SOAP notu için Notion arşivi.
                 # Her appointment_id de ayrıca işaretlenir (M2 idempotency).
                 for soap_note in soap_notes:
+                    # Risk alarmı: Notion arşivinden ÖNCE değerlendir;
+                    # arşiv hata verirse bile doktora bildirim gitmiş olur.
+                    try:
+                        from risk_alerts import evaluate_and_alert
+                        risk_result = evaluate_and_alert(soap_note)
+                        if risk_result["level"] != "none":
+                            logger.warning(
+                                "[AudioLoop] RİSK [%s] tespit edildi: %s | alarm=%s",
+                                risk_result["level"],
+                                soap_note.get("patient_name"),
+                                "gönderildi" if risk_result["alert_sent"] else "atlandı/başarısız",
+                            )
+                    except Exception as exc:
+                        logger.error("[AudioLoop] Risk alarmı hatası: %s", exc)
+
                     appt_key = soap_note.get("appointment_id", "")
                     if appt_key and store.is_seen("soap_archive", appt_key):
                         logger.info(
