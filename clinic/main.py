@@ -170,6 +170,20 @@ def _audio_inbox_loop():
                     except Exception as exc:
                         logger.error("[AudioLoop] Risk alarmı hatası: %s", exc)
 
+                    # İlaç takibi (NOTION_MEDICATIONS_DATABASE_ID set ise)
+                    try:
+                        from medications import reconcile_medications_from_soap
+                        med_result = reconcile_medications_from_soap(soap_note)
+                        if med_result.get("added") or med_result.get("ended"):
+                            logger.info(
+                                "[AudioLoop] İlaç reconcile: +%d -%d | %s",
+                                len(med_result.get("added", [])),
+                                len(med_result.get("ended", [])),
+                                soap_note.get("patient_name"),
+                            )
+                    except Exception as exc:
+                        logger.error("[AudioLoop] İlaç reconcile hatası: %s", exc)
+
                     appt_key = soap_note.get("appointment_id", "")
                     if appt_key and store.is_seen("soap_archive", appt_key):
                         logger.info(
