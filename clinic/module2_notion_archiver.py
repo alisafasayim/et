@@ -26,6 +26,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+from http_retry import raise_for_retry, with_retry
+
 # ---------------------------------------------------------------------------
 # Sabitler
 # ---------------------------------------------------------------------------
@@ -129,17 +131,19 @@ def _notion_headers() -> dict:
     }
 
 
+@with_retry()
 def _notion_post(endpoint: str, payload: dict) -> dict:
     url = f"{NOTION_BASE_URL}{endpoint}"
     response = requests.post(url, headers=_notion_headers(), json=payload, timeout=30)
-    response.raise_for_status()
+    raise_for_retry(response)
     return response.json()
 
 
+@with_retry()
 def _notion_patch(endpoint: str, payload: dict) -> dict:
     url = f"{NOTION_BASE_URL}{endpoint}"
     response = requests.patch(url, headers=_notion_headers(), json=payload, timeout=30)
-    response.raise_for_status()
+    raise_for_retry(response)
     return response.json()
 
 

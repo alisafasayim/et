@@ -30,6 +30,8 @@ import requests
 from docx import Document
 from markdown_it import MarkdownIt
 
+from http_retry import raise_for_retry, with_retry
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -65,18 +67,20 @@ def _headers() -> dict:
     }
 
 
+@with_retry()
 def _post(endpoint: str, payload: dict) -> dict:
     url = f"{NOTION_BASE_URL}{endpoint}"
     resp = requests.post(url, headers=_headers(), json=payload, timeout=30)
-    resp.raise_for_status()
+    raise_for_retry(resp)
     time.sleep(REQUEST_DELAY_SEC)
     return resp.json()
 
 
+@with_retry()
 def _patch(endpoint: str, payload: dict) -> dict:
     url = f"{NOTION_BASE_URL}{endpoint}"
     resp = requests.patch(url, headers=_headers(), json=payload, timeout=30)
-    resp.raise_for_status()
+    raise_for_retry(resp)
     time.sleep(REQUEST_DELAY_SEC)
     return resp.json()
 

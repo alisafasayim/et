@@ -1,5 +1,6 @@
 # Ortak
 python-dotenv>=1.0.1
+tenacity>=8.5.0
 
 # Modül 1 - Transkripsiyon ve Hasta Eşleştirme
 tinytag>=1.10.1

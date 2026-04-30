@@ -33,6 +33,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+from http_retry import raise_for_retry, with_retry
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -78,17 +80,19 @@ def _evo_headers() -> dict:
     }
 
 
+@with_retry()
 def _evo_post(path: str, payload: dict) -> dict:
     url = f"{EVOLUTION_API_URL}{path}"
     resp = requests.post(url, headers=_evo_headers(), json=payload, timeout=15)
-    resp.raise_for_status()
+    raise_for_retry(resp)
     return resp.json()
 
 
+@with_retry()
 def _evo_get(path: str) -> dict:
     url = f"{EVOLUTION_API_URL}{path}"
     resp = requests.get(url, headers=_evo_headers(), timeout=15)
-    resp.raise_for_status()
+    raise_for_retry(resp)
     return resp.json()
 
 

@@ -31,6 +31,8 @@ load_dotenv()
 
 import requests
 
+from http_retry import raise_for_retry, with_retry
+
 # Modül 3'ten WhatsApp gönderim fonksiyonunu içe aktar
 from module3_whatsapp_communicator import send_whatsapp_message
 
@@ -143,9 +145,13 @@ def get_access_token() -> str:
         "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
     }
 
-    resp = requests.post(PARASUT_TOKEN_URL, data=payload, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
+    @with_retry(max_attempts=3)
+    def _request_token() -> dict:
+        resp = requests.post(PARASUT_TOKEN_URL, data=payload, timeout=15)
+        raise_for_retry(resp)
+        return resp.json()
+
+    data = _request_token()
 
     _token_cache = TokenBundle(
         access_token=data["access_token"],
@@ -168,6 +174,27 @@ def _api_url(path: str) -> str:
     return f"{PARASUT_BASE_URL}/{PARASUT_COMPANY_ID}{path}"
 
 
+@with_retry()
+def _parasut_get(path: str, params: Optional[dict] = None, timeout: int = 15) -> dict:
+    """Paraşüt v4 GET — retry/backoff sarmalayıcısı."""
+    resp = requests.get(_api_url(path), headers=_headers(), params=params, timeout=timeout)
+    raise_for_retry(resp)
+    return resp.json()
+
+
+@with_retry()
+def _parasut_post(path: str, payload: Optional[dict] = None, timeout: int = 20) -> dict:
+    """Paraşüt v4 POST — retry/backoff sarmalayıcısı."""
+    resp = requests.post(
+        _api_url(path),
+        headers=_headers(),
+        json=payload if payload is not None else {},
+        timeout=timeout,
+    )
+    raise_for_retry(resp)
+    return resp.json()
+
+
 # ---------------------------------------------------------------------------
 # 2. e-Fatura Gelen Kutusu Sorgusu (Mükellef Kontrolü)
 # ---------------------------------------------------------------------------
@@ -177,14 +204,7 @@ def is_e_invoice_taxpayer(tax_id: str) -> bool:
     Verilen VKN/TCKN'nin e-Fatura mükellefi olup olmadığını sorgular.
     Mükellefse True, değilse False döner (e-SMM kesilmeli).
     """
-    resp = requests.get(
-        _api_url("/e_invoice_inboxes"),
-        headers=_headers(),
-        params={"filter[vkn]": tax_id},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    data = _parasut_get("/e_invoice_inboxes", params={"filter[vkn]": tax_id})
     inboxes = data.get("data", [])
     result = len(inboxes) > 0
     logger.info(
@@ -208,14 +228,8 @@ def find_or_create_contact(record: CollectionRecord) -> str:
         return record.contact_id
 
     # VKN/TCKN'ye göre ara
-    resp = requests.get(
-        _api_url("/contacts"),
-        headers=_headers(),
-        params={"filter[tax_number]": record.tax_id},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    existing = resp.json().get("data", [])
+    data = _parasut_get("/contacts", params={"filter[tax_number]": record.tax_id})
+    existing = data.get("data", [])
     if existing:
         contact_id = existing[0]["id"]
         logger.info("Mevcut contact bulundu: %s", contact_id)
@@ -235,14 +249,7 @@ def find_or_create_contact(record: CollectionRecord) -> str:
             },
         }
     }
-    resp = requests.post(
-        _api_url("/contacts"),
-        headers=_headers(),
-        json=payload,
-        timeout=15,
-    )
-    resp.raise_for_status()
-    contact_id = resp.json()["data"]["id"]
+    contact_id = _parasut_post("/contacts", payload)["data"]["id"]
     logger.info("Yeni contact oluşturuldu: %s (%s)", record.patient_name, contact_id)
     return contact_id
 
@@ -327,26 +334,16 @@ def create_esmm(record: CollectionRecord, contact_id: str) -> str:
         unit_price_str, vat_rate_str, withholding_rate_str, vat_withholding_rate_str,
     )
 
-    resp = requests.post(
-        _api_url("/sales_invoices"),
-        headers=_headers(),
-        json=payload,
-        timeout=20,
-    )
-    resp.raise_for_status()
-    response_data = resp.json()
+    response_data = _parasut_post("/sales_invoices", payload, timeout=20)
+    invoice_id = response_data["data"]["id"]
 
     # Asenkron işlem başlatma
-    job_resp = requests.post(
-        _api_url(f"/sales_invoices/{response_data['data']['id']}/issue_smm"),
-        headers=_headers(),
-        json={},
-        timeout=15,
+    job_resp = _parasut_post(f"/sales_invoices/{invoice_id}/issue_smm", {})
+    job_id = job_resp["data"]["id"]
+    logger.info(
+        "e-SMM oluşturma başlatıldı | invoice_id: %s | job_id: %s",
+        invoice_id, job_id,
     )
-    job_resp.raise_for_status()
-    job_id = job_resp.json()["data"]["id"]
-    logger.info("e-SMM oluşturma başlatıldı | invoice_id: %s | job_id: %s",
-                response_data["data"]["id"], job_id)
     return job_id
 
 
@@ -359,12 +356,9 @@ def poll_job_until_done(job_id: str) -> dict:
     Paraşüt trackable job'ını 'done' statüsüne geçene kadar periyodik sorgular.
     Başarıda iş sonuç verisini, başarısızlıkta exception fırlatır.
     """
-    url = _api_url(f"/trackable_jobs/{job_id}")
-
     for attempt in range(1, JOB_POLL_MAX_RETRIES + 1):
-        resp = requests.get(url, headers=_headers(), timeout=15)
-        resp.raise_for_status()
-        job_data = resp.json().get("data", {})
+        result = _parasut_get(f"/trackable_jobs/{job_id}")
+        job_data = result.get("data", {})
         status = job_data.get("attributes", {}).get("status", "")
         progress = job_data.get("attributes", {}).get("progress", 0)
 
@@ -395,14 +389,10 @@ def fetch_pdf_url(invoice_id: str) -> str:
     Tamamlanan e-SMM'nin imzalı PDF indirme linkini çeker.
     Döner: PDF URL
     """
-    resp = requests.get(
-        _api_url(f"/sales_invoices/{invoice_id}"),
-        headers=_headers(),
+    data = _parasut_get(
+        f"/sales_invoices/{invoice_id}",
         params={"include": "active_e_document"},
-        timeout=15,
     )
-    resp.raise_for_status()
-    data = resp.json()
 
     # Önce included içindeki e_document'tan PDF linkini al
     for included in data.get("included", []):
