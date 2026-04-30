@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Klinik runtime artifacts
+clinic/.env
+clinic/clinic.log
+clinic/clinic_state.db
+clinic/clinic_state.db-wal
+clinic/clinic_state.db-shm
+clinic/audio_inbox/
+clinic/audio_processed/
+clinic/credentials.json
+clinic/token.json
+clinic/*.soap.json
+
+# OS
+.DS_Store
+Thumbs.db
