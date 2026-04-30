@@ -22,6 +22,10 @@ import re
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import requests
 from docx import Document
 from markdown_it import MarkdownIt

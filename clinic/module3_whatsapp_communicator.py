@@ -23,6 +23,10 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import requests
 from flask import Flask, abort, jsonify, request
 from google.oauth2.credentials import Credentials

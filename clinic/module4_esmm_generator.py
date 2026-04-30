@@ -24,6 +24,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import requests
 
 # Modül 3'ten WhatsApp gönderim fonksiyonunu içe aktar

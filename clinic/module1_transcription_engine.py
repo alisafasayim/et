@@ -16,6 +16,10 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import ollama
 from faster_whisper import WhisperModel
 from google.oauth2.credentials import Credentials

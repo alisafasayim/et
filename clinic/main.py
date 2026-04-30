@@ -31,6 +31,12 @@ import threading
 import time
 from pathlib import Path
 
+# .env dosyasını modül importlarından ÖNCE yükle ki alt modüller
+# os.getenv() çağrılarını doğru değerlerle başlatabilsin.
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # ---------------------------------------------------------------------------
 # Modül içe aktarımları
 # ---------------------------------------------------------------------------
