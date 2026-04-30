@@ -33,8 +33,10 @@ import requests
 
 from http_retry import raise_for_retry, with_retry
 
-# Modül 3'ten WhatsApp gönderim fonksiyonunu içe aktar
-from module3_whatsapp_communicator import send_whatsapp_message
+# M3'ten gelen WhatsApp send fonksiyonu sadece send_pdf_via_whatsapp
+# içinde lazy import edilir; M4'ün test edilmesi M3'ün ağır
+# bağımlılıklarını (Flask, google-auth) zorunlu kılmasın diye top-level
+# import etmiyoruz.
 
 # Loglama yapılandırması logging_setup tarafından merkezi yapılır.
 logger = logging.getLogger("esmm_generator")
@@ -427,14 +429,10 @@ def send_pdf_via_whatsapp(phone: str, patient_name: str, pdf_url: str) -> dict:
     Evolution API üzerinden e-SMM PDF'ini WhatsApp mesajı olarak iletir.
     PDF URL doküman olarak gönderilir; ek metin açıklaması eklenir.
     """
-    from module3_whatsapp_communicator import (
-        EVOLUTION_INSTANCE_NAME,
-        _evo_headers,
-        _evo_post,
-        _normalize_phone,
-    )
+    from module3_whatsapp_communicator import EVOLUTION_INSTANCE_NAME, _evo_post
+    from phone_utils import normalize_phone
 
-    normalized = _normalize_phone(phone)
+    normalized = normalize_phone(phone)
     caption = (
         f"Merhaba {patient_name} velisi,\n"
         f"Seans makbuzunuz hazırlanmıştır. "

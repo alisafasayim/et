@@ -34,6 +34,10 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from http_retry import raise_for_retry, with_retry
+from phone_utils import (
+    extract_phone_from_description as _extract_phone_from_description,
+)
+from phone_utils import normalize_phone as _normalize_phone
 
 # Loglama yapılandırması logging_setup tarafından merkezi yapılır.
 # Basit getLogger; konfigürasyonu çağıran tarafa bırakırız.
@@ -166,20 +170,6 @@ def get_instance_status() -> dict:
 # 3. WhatsApp Mesaj Gönderimi
 # ---------------------------------------------------------------------------
 
-def _normalize_phone(phone: str) -> str:
-    """
-    Telefon numarasını Evolution API'nin beklediği formata getirir.
-    Başındaki + veya 0 kaldırılır, Türkiye için 90 ülke kodu eklenir.
-    Örn: "0532 123 45 67" → "905321234567"
-    """
-    digits = "".join(filter(str.isdigit, phone))
-    if digits.startswith("0"):
-        digits = "90" + digits[1:]
-    elif not digits.startswith("90"):
-        digits = "90" + digits
-    return digits
-
-
 def send_whatsapp_message(phone: str, message: str) -> dict:
     """
     Evolution API üzerinden belirtilen numaraya WhatsApp mesajı gönderir.
@@ -287,19 +277,6 @@ def fetch_recently_created_appointments(service) -> list[dict]:
                 }
             )
     return appointments
-
-
-def _extract_phone_from_description(description: str) -> str:
-    """
-    Takvim etkinliği açıklamasından telefon numarasını regex ile ayıklar.
-    Beklenen format: "Tel: 05321234567" veya "Veli Tel: +90 532 123 4567"
-    """
-    import re
-    pattern = r"(?:veli\s*)?tel[:\s]*([0-9\s\+\-\(\)]{10,15})"
-    match = re.search(pattern, description, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    return ""
 
 
 # ---------------------------------------------------------------------------
