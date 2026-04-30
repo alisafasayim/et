@@ -146,6 +146,11 @@ class PatientRegistry:
                 ),
             )
         logger.info("Yeni hasta kaydı: %s", short_pseudonym(new_uuid))
+        try:
+            from audit_log import audit
+            audit("patient.create", patient_uuid=new_uuid, details={"has_tax_id": bool(tax_id)})
+        except Exception:
+            pass  # audit yazılamadı; ana akış devam etsin (logger zaten yazdı)
         return new_uuid
 
     def get_patient(self, patient_uuid: str) -> Optional[dict]:
@@ -210,6 +215,11 @@ class PatientRegistry:
                 "UPDATE patients SET consent_at=?, updated_at=? WHERE uuid=?",
                 (when, now, patient_uuid),
             )
+        try:
+            from audit_log import audit
+            audit("consent.grant", patient_uuid=patient_uuid, details={"at": when})
+        except Exception:
+            pass
 
     def revoke_consent(self, patient_uuid: str) -> None:
         """Hasta/veli rızasını geri çekti — kayıt belirlenir, ileride
@@ -219,6 +229,11 @@ class PatientRegistry:
                 "UPDATE patients SET consent_at=NULL, updated_at=? WHERE uuid=?",
                 (datetime.now(tz=timezone.utc).isoformat(), patient_uuid),
             )
+        try:
+            from audit_log import audit
+            audit("consent.revoke", patient_uuid=patient_uuid)
+        except Exception:
+            pass
 
     def delete_patient(self, patient_uuid: str) -> bool:
         """
@@ -228,7 +243,14 @@ class PatientRegistry:
         """
         with self._cursor() as cur:
             cur.execute("DELETE FROM patients WHERE uuid=?", (patient_uuid,))
-            return cur.rowcount > 0
+            deleted = cur.rowcount > 0
+        if deleted:
+            try:
+                from audit_log import audit
+                audit("patient.delete", patient_uuid=patient_uuid)
+            except Exception:
+                pass
+        return deleted
 
     def list_all(self, limit: int = 100) -> list[dict]:
         """Tüm hastaları döner (admin paneli için)."""

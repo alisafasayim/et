@@ -47,6 +47,20 @@ def _require_admin(view):
             provided = request.args["token"]
         if provided != ADMIN_TOKEN:
             abort(401)
+        # Audit: admin paneli erişimi
+        try:
+            from audit_log import audit
+            audit(
+                "admin.access",
+                actor="admin",
+                details={
+                    "endpoint": request.path,
+                    "method": request.method,
+                    "ip": request.remote_addr,
+                },
+            )
+        except Exception:
+            pass
         return view(*args, **kwargs)
     return wrapper
 
@@ -167,6 +181,161 @@ def trigger_reminder():
     from module3_whatsapp_communicator import poll_upcoming_reminders
     results = poll_upcoming_reminders(horizon)
     return jsonify({"horizon": horizon, "results": results})
+
+
+@bp.route("/patients", methods=["GET"])
+@_require_admin
+def patients_list():
+    """
+    Hasta listesi. Doktor kendi panelinde gerçek isimleri görür;
+    Notion'a yansıtılan pseudonym de listede.
+    """
+    try:
+        from patient_registry import get_default_registry
+    except ImportError:
+        return jsonify([]), 200
+    rows = get_default_registry().list_all(limit=200)
+    out = [
+        {
+            "uuid": r["uuid"],
+            "pseudonym": r["pseudonym"],
+            "full_name": r["full_name"],
+            "phone": r["phone"],
+            "consent_at": r.get("consent_at"),
+            "notion_page_id": r.get("notion_page_id"),
+            "created_at": r.get("created_at"),
+        }
+        for r in rows
+    ]
+    return jsonify(out)
+
+
+@bp.route("/patients/lookup", methods=["GET"])
+@_require_admin
+def patient_lookup():
+    """
+    Hasta arama: ?name=Ali Yıldız | ?tax_id=12345...
+    PII döner — yalnızca yetkili admin için. Audit log'a düşer.
+    """
+    name = request.args.get("name", "").strip()
+    tax_id = request.args.get("tax_id", "").strip()
+    if not name and not tax_id:
+        abort(400, "name veya tax_id gerekli")
+
+    from patient_registry import get_default_registry
+    registry = get_default_registry()
+    if tax_id:
+        rec = registry.find_by_tax_id(tax_id)
+        results = [rec] if rec else []
+    else:
+        results = registry.find_by_name(name)
+
+    # Audit: hangi hasta arandı (PII içermez)
+    try:
+        from audit_log import audit
+        audit(
+            "patient.lookup",
+            actor="admin",
+            details={"by": "tax_id" if tax_id else "name", "hits": len(results)},
+        )
+    except Exception:
+        pass
+
+    return jsonify(
+        [
+            {
+                "uuid": r["uuid"],
+                "pseudonym": r["pseudonym"],
+                "full_name": r["full_name"],
+                "phone": r["phone"],
+                "consent_at": r.get("consent_at"),
+                "notion_page_id": r.get("notion_page_id"),
+            }
+            for r in results
+        ]
+    )
+
+
+@bp.route("/patients/register", methods=["POST"])
+@_require_admin
+def patient_register():
+    """
+    Yeni hasta kaydı + opsiyonel açık rıza zaman damgası.
+    JSON body: { full_name, tax_id?, phone?, birth_date?, consent_now? }
+    """
+    payload = request.get_json(silent=True) or {}
+    full_name = (payload.get("full_name") or "").strip()
+    if not full_name:
+        abort(400, "full_name zorunlu")
+    from patient_registry import get_default_registry
+    registry = get_default_registry()
+    uid = registry.create_patient(
+        full_name=full_name,
+        tax_id=(payload.get("tax_id") or "").strip(),
+        phone=(payload.get("phone") or "").strip(),
+        birth_date=(payload.get("birth_date") or "").strip(),
+    )
+    if payload.get("consent_now"):
+        registry.record_consent(uid)
+    rec = registry.get_patient(uid)
+    return jsonify(
+        {
+            "uuid": rec["uuid"],
+            "pseudonym": rec["pseudonym"],
+            "consent_at": rec.get("consent_at"),
+        }
+    )
+
+
+@bp.route("/patients/<patient_uuid>/consent", methods=["POST", "DELETE"])
+@_require_admin
+def patient_consent(patient_uuid: str):
+    """
+    POST   → açık rıza ver (KVKK m.5/2)
+    DELETE → rızayı geri çek; ileride delete'e geçebilir (m.7 unutulma hakkı)
+    """
+    from patient_registry import get_default_registry
+    registry = get_default_registry()
+    if registry.get_patient(patient_uuid) is None:
+        abort(404, "Hasta bulunamadı")
+
+    if request.method == "POST":
+        registry.record_consent(patient_uuid)
+        return jsonify({"status": "granted", "uuid": patient_uuid})
+    registry.revoke_consent(patient_uuid)
+    return jsonify({"status": "revoked", "uuid": patient_uuid})
+
+
+@bp.route("/patients/<patient_uuid>", methods=["DELETE"])
+@_require_admin
+def patient_delete(patient_uuid: str):
+    """
+    KVKK m.7 unutulma hakkı: yerel kaydı fiziksel siler.
+    Notion sayfası ayrıca elle silinmelidir (admin panelinde gösterilen
+    notion_page_id ile).
+    """
+    from patient_registry import get_default_registry
+    registry = get_default_registry()
+    deleted = registry.delete_patient(patient_uuid)
+    return jsonify({"status": "deleted" if deleted else "not_found", "uuid": patient_uuid})
+
+
+@bp.route("/audit", methods=["GET"])
+@_require_admin
+def audit_query():
+    """
+    Audit log sorgu. ?patient_uuid=... ?action=... ?since=... ?limit=...
+    KVKK m.12 denetim talebi durumunda raporlama için.
+    """
+    from audit_log import get_default_audit_log
+    rows = get_default_audit_log().query(
+        patient_uuid=request.args.get("patient_uuid"),
+        action=request.args.get("action"),
+        actor=request.args.get("actor"),
+        since=request.args.get("since"),
+        limit=int(request.args.get("limit", "200")),
+    )
+    return jsonify(rows)
 
 
 @bp.route("/trigger/esmm", methods=["POST"])

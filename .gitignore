@@ -20,6 +20,9 @@ clinic/clinic_state.db-shm
 clinic/patient_registry.db
 clinic/patient_registry.db-wal
 clinic/patient_registry.db-shm
+clinic/audit_log.db
+clinic/audit_log.db-wal
+clinic/audit_log.db-shm
 clinic/audio_inbox/
 clinic/audio_processed/
 clinic/credentials.json
