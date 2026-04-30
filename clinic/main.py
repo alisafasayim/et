@@ -295,9 +295,17 @@ def _anamnesis_followup_loop():
 
 def _webhook_server():
     """
-    Evolution API webhook'unu dinler.
-    İptal/erteleme mesajlarını işler.
+    Evolution API webhook'unu + admin paneli dinler.
+    İptal/erteleme mesajlarını işler, /webhook/payment ile e-SMM
+    tetikler, /admin/* ile operasyonel görünürlük sağlar.
     """
+    # Admin paneli kayıt (token yoksa 404 olarak gizli kalır)
+    try:
+        from admin_panel import register as register_admin
+        register_admin(flask_app)
+    except Exception as exc:
+        logger.warning("[Webhook] Admin paneli kayıt edilemedi: %s", exc)
+
     logger.info("[Webhook] Flask sunucusu başlatılıyor (port=%d)", WEBHOOK_LISTEN_PORT)
     flask_app.run(host="0.0.0.0", port=WEBHOOK_LISTEN_PORT, debug=False, use_reloader=False)
 
