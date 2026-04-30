@@ -32,10 +32,6 @@ from markdown_it import MarkdownIt
 
 from http_retry import raise_for_retry, with_retry
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
 logger = logging.getLogger("migration")
 
 # ---------------------------------------------------------------------------
@@ -439,6 +435,9 @@ def migrate_directory(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    from logging_setup import configure_logging
+    configure_logging()
+
     parser = argparse.ArgumentParser(
         description="Samsung Notes → Notion Toplu Migrasyon",
         formatter_class=argparse.RawDescriptionHelpFormatter,

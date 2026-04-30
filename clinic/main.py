@@ -66,17 +66,12 @@ from module4_esmm_generator import (
 from module5_migration import migrate_directory
 
 # ---------------------------------------------------------------------------
-# Loglama
+# Loglama (rotation + PII maskeleme)
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("clinic.log", encoding="utf-8"),
-    ],
-)
+from logging_setup import configure_logging
+
+configure_logging()
 logger = logging.getLogger("main")
 
 # ---------------------------------------------------------------------------

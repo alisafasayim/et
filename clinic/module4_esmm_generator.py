@@ -36,10 +36,7 @@ from http_retry import raise_for_retry, with_retry
 # Modül 3'ten WhatsApp gönderim fonksiyonunu içe aktar
 from module3_whatsapp_communicator import send_whatsapp_message
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+# Loglama yapılandırması logging_setup tarafından merkezi yapılır.
 logger = logging.getLogger("esmm_generator")
 
 # ---------------------------------------------------------------------------
@@ -536,6 +533,9 @@ async def process_collection_async(record: CollectionRecord) -> dict:
 
 if __name__ == "__main__":
     import argparse
+
+    from logging_setup import configure_logging
+    configure_logging()
 
     parser = argparse.ArgumentParser(description="e-SMM Otomasyon Modülü")
     parser.add_argument("--patient-name", required=True)

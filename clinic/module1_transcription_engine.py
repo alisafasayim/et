@@ -568,4 +568,6 @@ def run_inbox_processor():
 
 
 if __name__ == "__main__":
+    from logging_setup import configure_logging
+    configure_logging()
     run_inbox_processor()

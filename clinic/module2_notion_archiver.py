@@ -466,6 +466,9 @@ def archive_all_soap_files(
 if __name__ == "__main__":
     import argparse
 
+    from logging_setup import configure_logging
+    configure_logging()
+
     parser = argparse.ArgumentParser(description="Notion Arşivleyici")
     parser.add_argument(
         "--soap-dir",

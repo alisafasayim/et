@@ -35,10 +35,8 @@ from googleapiclient.discovery import build
 
 from http_retry import raise_for_retry, with_retry
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+# Loglama yapılandırması logging_setup tarafından merkezi yapılır.
+# Basit getLogger; konfigürasyonu çağıran tarafa bırakırız.
 logger = logging.getLogger("whatsapp_communicator")
 
 # ---------------------------------------------------------------------------
@@ -553,6 +551,9 @@ def setup_and_start():
 
 if __name__ == "__main__":
     import argparse
+
+    from logging_setup import configure_logging
+    configure_logging()
 
     parser = argparse.ArgumentParser(description="WhatsApp İletişim Modülü")
     parser.add_argument(
