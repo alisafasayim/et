@@ -30,6 +30,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 # .env dosyasını modül importlarından ÖNCE yükle ki alt modüller
 # os.getenv() çağrılarını doğru değerlerle başlatabilsin.
@@ -242,29 +243,41 @@ def start_clinic_system():
     """
     Tüm arka plan iş parçacıklarını başlatır ve ana süreç olarak bekler.
     Ctrl+C ile durdurulabilir.
+
+    Bir thread öldüğünde aynı Thread nesnesi yeniden start()
+    edilemez (Python'da RuntimeError fırlatır). Bu nedenle
+    thread'leri name → factory eşlemesinde tutuyoruz; ölen
+    thread'in yerine yeni bir Thread nesnesi yaratılır.
     """
     logger.info("=" * 60)
     logger.info("Klinik Yönetim Sistemi başlatılıyor...")
     logger.info("=" * 60)
 
-    threads = [
-        threading.Thread(target=_audio_inbox_loop, name="AudioLoop", daemon=True),
-        threading.Thread(target=_calendar_poll_loop, name="CalendarLoop", daemon=True),
-        threading.Thread(target=_webhook_server, name="WebhookServer", daemon=True),
-    ]
+    thread_specs: dict[str, Callable[[], None]] = {
+        "AudioLoop": _audio_inbox_loop,
+        "CalendarLoop": _calendar_poll_loop,
+        "WebhookServer": _webhook_server,
+    }
 
-    for t in threads:
+    def _spawn(name: str) -> threading.Thread:
+        t = threading.Thread(target=thread_specs[name], name=name, daemon=True)
         t.start()
-        logger.info("İş parçacığı başlatıldı: %s", t.name)
+        logger.info("İş parçacığı başlatıldı: %s", name)
+        return t
+
+    threads: dict[str, threading.Thread] = {
+        name: _spawn(name) for name in thread_specs
+    }
 
     logger.info("Sistem çalışıyor. Durdurmak için Ctrl+C.")
     try:
         while True:
-            # Tüm iş parçacıklarının sağlığını kontrol et
-            for t in threads:
+            for name, t in list(threads.items()):
                 if not t.is_alive():
-                    logger.error("İş parçacığı durdu: %s — yeniden başlatılıyor", t.name)
-                    t.start()
+                    logger.error(
+                        "İş parçacığı durdu: %s — yeniden başlatılıyor", name
+                    )
+                    threads[name] = _spawn(name)
             time.sleep(30)
     except KeyboardInterrupt:
         logger.info("Sistem durduruldu.")
