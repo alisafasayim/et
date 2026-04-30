@@ -18,10 +18,11 @@ from typing import Optional, Any
 
 from notion_client import Client as NotionSDK
 
-from clinic_automation.config.settings import NotionConfig
+from clinic_automation.config.settings import NotionConfig, SecurityConfig, get_config
 from clinic_automation.modules.clinical_notes import ClinicalNote
 from clinic_automation.modules.google_calendar import Appointment
 from clinic_automation.modules.google_forms import FormResponse
+from clinic_automation.utils.security import EncryptionManager
 from clinic_automation.utils.helpers import fuzzy_name_match
 
 logger = logging.getLogger(__name__)
@@ -50,9 +51,21 @@ class NotionPatient:
 class NotionClient:
     """Notion API istemcisi - 5 veritabanı yönetimi."""
 
-    def __init__(self, config: NotionConfig):
+    def __init__(
+        self,
+        config: NotionConfig,
+        security_config: Optional[SecurityConfig] = None,
+        encryption_manager: Optional[EncryptionManager] = None,
+    ):
         self.config = config
+        self.security_config = security_config or get_config().security
+        self.encryption = encryption_manager
         self._client = None
+        if self._encryption_enabled() and self.encryption is None:
+            self.encryption = EncryptionManager(
+                self.security_config.encryption_key_path,
+                self.security_config.rsa_key_path,
+            )
 
     @property
     def client(self) -> NotionSDK:
@@ -62,6 +75,58 @@ class NotionClient:
                 notion_version=self.config.api_version,
             )
         return self._client
+
+    def _encryption_enabled(self) -> bool:
+        return bool(
+            self.security_config
+            and (
+                self.security_config.field_level_encryption
+                or self.security_config.encrypt_transcripts
+            )
+        )
+
+    def _protect_text(self, field_name: str, text: str) -> str:
+        if not text or not self._encryption_enabled() or self.encryption is None:
+            return text or ""
+        encrypted = self.encryption.encrypt_dict_fields(
+            {field_name: text},
+            field_names=[field_name],
+        )
+        return encrypted.get(field_name, text)
+
+    def _secure_chunks(
+        self,
+        field_name: str,
+        text: str,
+        plain_chunk_size: int = 220,
+    ) -> list[str]:
+        if not text:
+            return [""]
+        if not self._encryption_enabled():
+            return self._chunk_text(text, 2000)
+
+        chunks = []
+        for plain_chunk in self._chunk_text(text, plain_chunk_size):
+            chunks.extend(self._chunk_text(self._protect_text(field_name, plain_chunk), 2000))
+        return chunks
+
+    def _property_text(self, field_name: str, text: str) -> str:
+        if not text:
+            return ""
+        if self._encryption_enabled():
+            return f"[{field_name}: şifreli içerik sayfa bloklarında]"
+        return text[:2000]
+
+    @staticmethod
+    def _field_name_for_section(title: str) -> str:
+        title_lower = title.lower()
+        if "tanı" in title_lower:
+            return "diagnosis"
+        if "ilaç" in title_lower:
+            return "medication"
+        if "risk" in title_lower:
+            return "risk_assessment"
+        return "clinical_note"
 
     # ─────────────────── Hasta Yönetimi ───────────────────
 
@@ -270,7 +335,7 @@ class NotionClient:
                 "date": {"start": session_date}
             },
             "Tanı": {
-                "rich_text": [{"text": {"content": note.diagnosis[:2000]}}]
+                "rich_text": [{"text": {"content": self._property_text("diagnosis", note.diagnosis)}}]
             },
         }
 
@@ -345,7 +410,8 @@ class NotionClient:
                 },
             })
             # İçerik (Notion'da 2000 karakter sınırı var, böl)
-            for chunk in self._chunk_text(content, 2000):
+            field_name = self._field_name_for_section(title)
+            for chunk in self._secure_chunks(field_name, content):
                 blocks.append({
                     "object": "block",
                     "type": "paragraph",
@@ -382,11 +448,12 @@ class NotionClient:
                     text += f" (Süre: {item.deadline})"
                 if item.responsible:
                     text += f" → {item.responsible}"
+                text = self._protect_text("clinical_note", text)[:2000]
                 blocks.append({
                     "object": "block",
                     "type": "to_do",
                     "to_do": {
-                        "rich_text": [{"type": "text", "text": {"content": text[:2000]}}],
+                        "rich_text": [{"type": "text", "text": {"content": text}}],
                         "checked": False,
                     },
                 })
@@ -415,14 +482,14 @@ class NotionClient:
         ]
 
         fields = [
-            ("Başvuru Şikayeti", form.complaint),
-            ("Tıbbi Geçmiş", form.medical_history),
-            ("Aile Öyküsü", form.family_history),
-            ("Okul Bilgisi", form.school_info),
-            ("Kullandığı İlaçlar", form.medications),
+            ("Başvuru Şikayeti", form.complaint, "clinical_note"),
+            ("Tıbbi Geçmiş", form.medical_history, "clinical_note"),
+            ("Aile Öyküsü", form.family_history, "clinical_note"),
+            ("Okul Bilgisi", form.school_info, "clinical_note"),
+            ("Kullandığı İlaçlar", form.medications, "medication"),
         ]
 
-        for label, value in fields:
+        for label, value, field_name in fields:
             if value:
                 blocks.append({
                     "object": "block",
@@ -431,7 +498,7 @@ class NotionClient:
                         "rich_text": [{"type": "text", "text": {"content": label}}]
                     },
                 })
-                for chunk in self._chunk_text(value, 2000):
+                for chunk in self._secure_chunks(field_name, value):
                     blocks.append({
                         "object": "block",
                         "type": "paragraph",
@@ -531,7 +598,7 @@ class NotionClient:
                 "type": "heading_2",
                 "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Transkript Önizleme"}}]},
             }]
-            for chunk in self._chunk_text(transcript_preview[:4000], 2000):
+            for chunk in self._secure_chunks("transcript", transcript_preview[:4000]):
                 blocks.append({
                     "object": "block",
                     "type": "paragraph",
@@ -554,7 +621,16 @@ class NotionClient:
             "Başlık": {"title": [{"text": {"content": f"Anamnez - {patient.name}"}}]},
             "Hasta": {"relation": [{"id": patient.page_id}]},
             "Form Tarihi": {"date": {"start": form_response.submitted_at.strftime("%Y-%m-%d")}},
-            "Şikayet": {"rich_text": [{"text": {"content": (form_response.complaint or "")[:2000]}}]},
+            "Şikayet": {
+                "rich_text": [{
+                    "text": {
+                        "content": self._property_text(
+                            "clinical_note",
+                            form_response.complaint or "",
+                        )
+                    }
+                }]
+            },
         }
 
         page = self.client.pages.create(

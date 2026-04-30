@@ -28,6 +28,7 @@ import hashlib
 import logging
 from pathlib import Path
 from datetime import datetime
+from xml.sax.saxutils import escape
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -98,9 +99,10 @@ def twilio_webhook():
 
 def _twilio_response(message: str) -> Response:
     """TwiML formatında yanıt üretir."""
+    safe_message = escape(message or "")
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Message>{message}</Message>
+    <Message>{safe_message}</Message>
 </Response>"""
     return Response(twiml, mimetype="text/xml")
 
@@ -109,7 +111,8 @@ def _verify_twilio_signature(request) -> bool:
     """Twilio webhook imzasını doğrular (güvenlik)."""
     auth_token = config.whatsapp.twilio_auth_token
     if not auth_token:
-        return True
+        logger.error("TWILIO_AUTH_TOKEN ayarlanmamış; Twilio webhook reddediliyor.")
+        return False
 
     try:
         from twilio.request_validator import RequestValidator
@@ -118,8 +121,8 @@ def _verify_twilio_signature(request) -> bool:
         url = request.url.replace("http://", "https://", 1)
         return validator.validate(url, request.form.to_dict(), signature)
     except Exception as e:
-        logger.warning("İmza doğrulama hatası, geçiliyor: %s", e)
-        return True
+        logger.warning("İmza doğrulama hatası: %s", e)
+        return False
 
 
 # ─────────────────── Evolution API Webhook ───────────────────

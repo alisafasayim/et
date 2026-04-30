@@ -415,12 +415,10 @@ class ChatbotEngine:
     def _handle_emergency(self, state: ConversationState) -> str:
         return (
             "DİKKAT: Mesajınız acil durum olarak algılandı.\n\n"
-            "Acil yardım için:\n"
-            "- 112 Acil Çağrı\n"
-            "- 182 ALO Psikiyatri Hattı\n"
-            "- En yakın acil servise başvurunuz\n\n"
-            "Sağlık ekibimiz en kısa sürede sizinle iletişime geçecektir. "
-            "Lütfen yalnız kalmayınız."
+            "Bu kanal acil müdahale yerine geçmez. Hemen 112 Acil Çağrı "
+            "Merkezi'ni arayın veya en yakın acil servise başvurun.\n\n"
+            "Lütfen yalnız kalmayın ve yakınınızdaki güvenilir bir yetişkinden "
+            "hemen destek isteyin."
         )
 
     def _escalate_to_human(self, state: ConversationState, intent: IntentResult) -> str:

@@ -1,0 +1,6 @@
+.encryption_key
+audit.log
+
+clinic_automation/.rsa_key*.pem
+clinic_automation/.venv/
+clinic_automation/debug.log

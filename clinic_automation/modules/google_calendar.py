@@ -5,9 +5,11 @@ Randevu verilerini çeker, hasta-zaman eşleştirmesi için kullanılır.
 """
 
 import logging
+import os
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from google.oauth2.credentials import Credentials
 from google.oauth2 import service_account
@@ -42,6 +44,8 @@ class GoogleCalendarClient:
     def __init__(self, config: GoogleConfig):
         self.config = config
         self._service = None
+        self.timezone_name = os.getenv("TIMEZONE", "Europe/Istanbul")
+        self.timezone = ZoneInfo(self.timezone_name)
 
     def authenticate(self) -> None:
         """Service account veya OAuth2 ile kimlik doğrulama yapar."""
@@ -93,14 +97,19 @@ class GoogleCalendarClient:
         """Belirli bir günün randevularını getirir."""
         cal_id = calendar_id or self.config.calendar_id
 
-        # Günün başı ve sonu (UTC)
-        start_of_day = date.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Gün sınırlarını klinik saat diliminde kur; UTC Z eklemek günü kaydırır.
+        if date.tzinfo is None:
+            local_date = date.replace(tzinfo=self.timezone)
+        else:
+            local_date = date.astimezone(self.timezone)
+        start_of_day = local_date.replace(hour=0, minute=0, second=0, microsecond=0)
         end_of_day = start_of_day + timedelta(days=1)
 
         events_result = self.service.events().list(
             calendarId=cal_id,
-            timeMin=start_of_day.isoformat() + "Z",
-            timeMax=end_of_day.isoformat() + "Z",
+            timeMin=start_of_day.isoformat(),
+            timeMax=end_of_day.isoformat(),
+            timeZone=self.timezone_name,
             singleEvents=True,
             orderBy="startTime",
         ).execute()

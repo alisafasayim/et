@@ -59,15 +59,19 @@ class ClinicAutomation:
         self.transcriber = AudioTranscriber(self.config.transcription)
         self.preprocessor = AudioPreprocessor()
         self.note_generator = ClinicalNoteGenerator(self.config.llm)
-        self.notion = NotionClient(self.config.notion)
-        self.risk_assessor = RiskAssessor()
-        self.journey_manager = JourneyManager()
-        self.chatbot = ChatbotEngine(self.config.whatsapp)
-        self.scale_scorer = ScaleScorer()
         self.encryption = EncryptionManager(
             self.config.security.encryption_key_path,
             self.config.security.rsa_key_path,
         )
+        self.notion = NotionClient(
+            self.config.notion,
+            self.config.security,
+            self.encryption,
+        )
+        self.risk_assessor = RiskAssessor()
+        self.journey_manager = JourneyManager()
+        self.chatbot = ChatbotEngine(self.config.whatsapp)
+        self.scale_scorer = ScaleScorer()
         self.audit = AuditLogger(self.config.security.audit_log_path)
 
     def process_audio_files(
@@ -185,6 +189,9 @@ class ClinicAutomation:
                             "file_size": audio_file.stat().st_size,
                         },
                     )
+                    match_result.audio_path = str(audio_file)
+                    match_result.original_audio_path = str(audio_file)
+                    match_result.processed_audio_path = process_path
                     match_results.append(match_result)
 
                 except Exception as e:
@@ -266,11 +273,13 @@ class ClinicAutomation:
                     page_id = self.notion.add_clinical_note(patient, note)
 
                     # Notion'a yaz - Ses kaydı metadata
-                    audio_quality = preprocessed_map.get(match.audio_path, {}).get("quality", "")
+                    original_audio_path = match.original_audio_path or match.audio_path
+                    processed_audio_path = match.processed_audio_path or match.audio_path
+                    audio_quality = preprocessed_map.get(original_audio_path, {}).get("quality", "")
                     try:
                         self.notion.add_audio_record(
                             patient=patient,
-                            audio_path=match.audio_path,
+                            audio_path=original_audio_path,
                             session_date=date_str,
                             duration_seconds=segment.end_time - segment.start_time,
                             quality=audio_quality,
@@ -292,12 +301,12 @@ class ClinicAutomation:
                     )
 
                     # İşlenmiş olarak işaretle + geçici dosyaları temizle
-                    audio_path = Path(match.audio_path)
+                    audio_path = Path(original_audio_path)
                     done_marker = audio_path.with_suffix(audio_path.suffix + ".done")
                     done_marker.touch()
-                    processed_wav = audio_path.with_stem(audio_path.stem + "_processed").with_suffix(".wav")
-                    if processed_wav.exists():
-                        processed_wav.unlink()
+                    processed_path = Path(processed_audio_path)
+                    if processed_path != audio_path and processed_path.exists():
+                        processed_path.unlink()
 
                     # Sonuç göster
                     status = "needs_review" if match.needs_review else "success"

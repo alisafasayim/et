@@ -53,6 +53,8 @@ class MatchResult:
     audio_path: str
     audio_date: Optional[datetime]
     patient_segments: list[PatientSegment]
+    original_audio_path: str = ""
+    processed_audio_path: str = ""
     is_multi_patient: bool = False
     is_multi_part: bool = False
     needs_review: bool = False
@@ -548,6 +550,8 @@ def merge_partial_recordings(
                 confidence=max(s.confidence for s in combined_segments),
                 match_reasons=[f"Birleştirilmiş kayıt ({len(parts)} parça)"],
             )],
+            original_audio_path=parts[0].original_audio_path or parts[0].audio_path,
+            processed_audio_path=parts[0].processed_audio_path,
             is_multi_patient=False,
             is_multi_part=True,
         )
