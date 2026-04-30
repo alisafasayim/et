@@ -195,7 +195,8 @@ def send_appointment_reminder(
     form_url: str = "",
 ) -> dict:
     """
-    Randevu hatırlatma ve anamnez formu mesajını gönderir.
+    Yeni oluşturulan randevu için hoşgeldin mesajı + anamnez formu linki.
+    Bu, randevu OLUŞTURULDUĞUNDA (poll_and_notify) gönderilir.
     """
     form_url = form_url or GOOGLE_ANAMNESIS_FORM_URL
     appointment_str = appointment_dt.strftime("%d.%m.%Y %H:%M")
@@ -206,6 +207,36 @@ def send_appointment_reminder(
         f"Lütfen gelmeden önce aşağıdaki anamnez formunu doldurunuz:\n"
         f"{form_url}\n\n"
         f"Herhangi bir değişiklik için bu mesajı yanıtlayabilirsiniz."
+    )
+    return send_whatsapp_message(guardian_phone, message)
+
+
+def send_upcoming_reminder(
+    patient_name: str,
+    guardian_phone: str,
+    appointment_dt: datetime,
+    horizon: str,
+) -> dict:
+    """
+    Yaklaşan randevu için kısa hatırlatma. horizon: '24h' veya '1h'.
+    Anamnez form linki içermez (oluşturma anında zaten gönderildi);
+    bu mesaj randevunun yaklaştığını belirtir, no-show oranını düşürür.
+    """
+    appointment_str = appointment_dt.strftime("%d.%m.%Y %H:%M")
+    if horizon == "24h":
+        intro = "Yarın randevunuz var!"
+    elif horizon == "1h":
+        intro = "Randevunuz yaklaşık 1 saat sonra başlıyor!"
+    else:
+        intro = f"Yaklaşan randevu hatırlatması ({horizon})"
+
+    message = (
+        f"Merhaba {patient_name} velisi,\n\n"
+        f"⏰ {intro}\n"
+        f"📅 *{appointment_str}*\n\n"
+        f"Gelemeyecekseniz lütfen bu mesajı 'iptal' yazarak yanıtlayın; "
+        f"böylece slot başka bir hastaya açılabilir.\n\n"
+        f"İyi günler dileriz."
     )
     return send_whatsapp_message(guardian_phone, message)
 
@@ -276,6 +307,51 @@ def fetch_recently_created_appointments(service) -> list[dict]:
                     "patient_name": event.get("summary", "Bilinmiyor"),
                 }
             )
+    return appointments
+
+
+def fetch_upcoming_appointments(
+    service,
+    window_start: datetime,
+    window_end: datetime,
+) -> list[dict]:
+    """
+    Belirli bir zaman penceresinde başlayacak randevuları döner.
+    24h ve 1h hatırlatma cron'larında kullanılır — fetch_recently_
+    created_appointments yalnızca yeni oluşturulanları getirir,
+    bu fonksiyon ise GELECEKTEKİ randevuları getirir.
+    """
+    events_result = (
+        service.events()
+        .list(
+            calendarId=GOOGLE_CALENDAR_ID,
+            timeMin=window_start.astimezone(timezone.utc).isoformat(),
+            timeMax=window_end.astimezone(timezone.utc).isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
+
+    appointments = []
+    for event in events_result.get("items", []):
+        # All-day eventları atla; klinik randevu saatli olur
+        if "dateTime" not in event["start"]:
+            continue
+        start_str = event["start"]["dateTime"]
+        appointments.append(
+            {
+                "event_id": event["id"],
+                "summary": event.get("summary", ""),
+                "description": event.get("description", ""),
+                "start": start_str,
+                "start_dt": datetime.fromisoformat(start_str.replace("Z", "+00:00")),
+                "phone": _extract_phone_from_description(
+                    event.get("description", "")
+                ),
+                "patient_name": event.get("summary", "Bilinmiyor"),
+            }
+        )
     return appointments
 
 
@@ -454,6 +530,78 @@ def _handle_connection_update(event: dict) -> None:
 # ---------------------------------------------------------------------------
 # 7. Ana Orkestratör – Takvim Polling ve Mesaj Gönderimi
 # ---------------------------------------------------------------------------
+
+def poll_upcoming_reminders(horizon: str = "24h") -> list[dict]:
+    """
+    Belirtilen horizon (24h veya 1h) yaklaşan randevular için
+    hatırlatma WhatsApp mesajı gönderir.
+
+    Idempotency: her (event_id, horizon) kombinasyonu state store'da
+    işaretlenir; aynı saatlerde tetiklenirse duplicate mesaj gitmez.
+
+    Cron örnekleri:
+      */15 * * * * python -c "from module3...wa_communicator import poll_upcoming_reminders; poll_upcoming_reminders('24h')"
+      */10 * * * * python -c "from ...                                                                 ; poll_upcoming_reminders('1h')"
+    """
+    from state_store import get_default_store
+
+    if horizon == "24h":
+        offset = timedelta(hours=24)
+        # 24h hatırlatma window: T-24h ± 30dk (cron 15'lik kaçırırsa garanti)
+        slack = timedelta(minutes=30)
+    elif horizon == "1h":
+        offset = timedelta(hours=1)
+        slack = timedelta(minutes=15)
+    else:
+        raise ValueError(f"Geçersiz horizon: {horizon}")
+
+    store = get_default_store()
+    service = get_calendar_service()
+    now = datetime.now(tz=timezone.utc)
+
+    # T = şu an + offset (24h sonra başlayacak)
+    window_start = now + offset - slack
+    window_end = now + offset + slack
+
+    upcoming = fetch_upcoming_appointments(service, window_start, window_end)
+    logger.info(
+        "[Reminder %s] Pencere %s ↔ %s | bulunan randevu: %d",
+        horizon, window_start.isoformat(), window_end.isoformat(), len(upcoming),
+    )
+
+    namespace = f"reminder_{horizon}"
+    results = []
+
+    for appt in upcoming:
+        event_id = appt["event_id"]
+
+        if not appt["phone"]:
+            logger.warning(
+                "[Reminder %s] Telefon yok: %s", horizon, appt["summary"]
+            )
+            results.append({"appointment_id": event_id, "status": "no_phone"})
+            continue
+
+        if not store.claim(namespace, event_id, meta=appt.get("summary", "")):
+            results.append({"appointment_id": event_id, "status": "already_sent"})
+            continue
+
+        try:
+            send_upcoming_reminder(
+                patient_name=appt["patient_name"],
+                guardian_phone=appt["phone"],
+                appointment_dt=appt["start_dt"],
+                horizon=horizon,
+            )
+            results.append({"appointment_id": event_id, "status": "sent"})
+        except Exception as exc:
+            logger.error("[Reminder %s] Gönderilemedi [%s]: %s", horizon, event_id, exc)
+            # Başarısız → claim'i geri al ki bir sonraki cron tekrar denesin
+            store.forget(namespace, event_id)
+            results.append({"appointment_id": event_id, "status": "failed", "error": str(exc)})
+
+    return results
+
 
 def poll_and_notify() -> list[dict]:
     """

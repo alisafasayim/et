@@ -58,6 +58,7 @@ from module3_whatsapp_communicator import (
     configure_webhook,
     get_instance_status,
     poll_and_notify,
+    poll_upcoming_reminders,
 )
 from module4_esmm_generator import (
     CollectionRecord,
@@ -81,6 +82,9 @@ logger = logging.getLogger("main")
 GOOGLE_ANAMNESIS_FORM_ID = os.getenv("GOOGLE_ANAMNESIS_FORM_ID", "")
 AUDIO_POLL_INTERVAL_SEC = int(os.getenv("AUDIO_POLL_INTERVAL_SEC", "60"))
 CALENDAR_POLL_INTERVAL_SEC = int(os.getenv("CALENDAR_POLL_INTERVAL_SEC", "600"))
+# Yaklaşan randevu hatırlatma cron'ları (saniye)
+REMINDER_24H_INTERVAL_SEC = int(os.getenv("REMINDER_24H_INTERVAL_SEC", "900"))   # 15 dk
+REMINDER_1H_INTERVAL_SEC = int(os.getenv("REMINDER_1H_INTERVAL_SEC", "300"))     # 5 dk
 WEBHOOK_LISTEN_PORT = int(os.getenv("WEBHOOK_LISTEN_PORT", "5055"))
 
 # ---------------------------------------------------------------------------
@@ -217,6 +221,35 @@ def _calendar_poll_loop():
         time.sleep(CALENDAR_POLL_INTERVAL_SEC)
 
 
+def _reminder_loop(horizon: str, interval_sec: int):
+    """
+    Yaklaşan randevular için (24h veya 1h önce) hatırlatma cron'u.
+    Her (event_id, horizon) için state_store ile idempotent.
+    """
+    logger.info(
+        "[Reminder %s] Başlatıldı | aralık: %ds", horizon, interval_sec
+    )
+    while True:
+        try:
+            results = poll_upcoming_reminders(horizon)
+            sent = sum(1 for r in results if r.get("status") == "sent")
+            if sent:
+                logger.info(
+                    "[Reminder %s] %d hatırlatma gönderildi", horizon, sent
+                )
+        except Exception as exc:
+            logger.error("[Reminder %s] Hata: %s", horizon, exc)
+        time.sleep(interval_sec)
+
+
+def _reminder_24h_loop():
+    _reminder_loop("24h", REMINDER_24H_INTERVAL_SEC)
+
+
+def _reminder_1h_loop():
+    _reminder_loop("1h", REMINDER_1H_INTERVAL_SEC)
+
+
 # ---------------------------------------------------------------------------
 # İş Parçacığı 3: Webhook Sunucusu (Modül 3 + tetikleyici)
 # ---------------------------------------------------------------------------
@@ -324,6 +357,8 @@ def start_clinic_system():
     thread_specs: dict[str, Callable[[], None]] = {
         "AudioLoop": _audio_inbox_loop,
         "CalendarLoop": _calendar_poll_loop,
+        "Reminder24h": _reminder_24h_loop,
+        "Reminder1h": _reminder_1h_loop,
         "WebhookServer": _webhook_server,
     }
 
