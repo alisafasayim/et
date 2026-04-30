@@ -550,6 +550,132 @@ def _verify_webhook_signature(payload_bytes: bytes, signature_header: str) -> bo
     return hmac.compare_digest(expected, signature_header or "")
 
 
+# ---------------------------------------------------------------------------
+# Tahsilat (POS / iyzico) Webhook → otomatik e-SMM tetikleme
+# ---------------------------------------------------------------------------
+
+PAYMENT_WEBHOOK_SECRET = os.getenv("PAYMENT_WEBHOOK_SECRET", "")
+
+
+def _verify_payment_signature(payload_bytes: bytes, signature_header: str) -> bool:
+    """
+    Payment webhook için ayrı bir secret ile HMAC-SHA256 doğrulaması.
+    PAYMENT_WEBHOOK_SECRET set değilse fail-closed (WhatsApp webhook
+    ile aynı politika).
+    """
+    if not PAYMENT_WEBHOOK_SECRET:
+        if WEBHOOK_REQUIRE_SIGNATURE:
+            logger.critical(
+                "PAYMENT_WEBHOOK_SECRET ayarlanmamış. /webhook/payment isteği reddedildi."
+            )
+            return False
+        logger.warning("Payment webhook imzası dev modda atlandı.")
+        return True
+    expected = hmac.new(
+        PAYMENT_WEBHOOK_SECRET.encode(), payload_bytes, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature_header or "")
+
+
+def _normalize_payment_payload(raw: dict) -> dict | None:
+    """
+    POS sağlayıcısından bağımsız ortak şemaya çevirir.
+
+    Beklenen ortak alanlar (kayda hangi field'ları gönderdiğine bakar):
+        amount, patient_name, guardian_phone, tax_id, collection_key
+        appointment_date (isteğe bağlı)
+        description (isteğe bağlı)
+
+    Sağlayıcı 'event' veya 'status' alanında 'success' / 'paid'
+    benzeri bir değer gönderiyorsa True kabul edilir; aksi halde None.
+
+    İhtiyaca göre sağlayıcı-spesifik adapter eklenebilir; şimdilik
+    her sağlayıcının webhook payload'ını klinik tarafında elle
+    `amount`, `patient_name`, `guardian_phone`, `tax_id` ile
+    normalize eden generic bir contract.
+    """
+    status = (raw.get("event") or raw.get("status") or "").lower()
+    success_markers = {"success", "succeeded", "paid", "completed", "payment.succeeded", "payment_intent.succeeded"}
+    if status and not any(m in status for m in success_markers):
+        return None
+
+    required = ("amount", "patient_name", "guardian_phone", "tax_id")
+    if not all(raw.get(k) for k in required):
+        return None
+
+    return {
+        "amount": raw["amount"],
+        "patient_name": str(raw["patient_name"]),
+        "guardian_phone": str(raw["guardian_phone"]),
+        "tax_id": str(raw["tax_id"]),
+        "description": str(raw.get("description", "Çocuk ve Ergen Psikiyatrisi Muayenesi")),
+        "appointment_date": str(raw.get("appointment_date", "")),
+        "collection_key": str(raw.get("collection_key", raw.get("id", ""))),
+    }
+
+
+@app.route("/webhook/payment", methods=["POST"])
+def payment_webhook():
+    """
+    POS / ödeme sağlayıcı webhook'u → otomatik e-SMM tetikleme.
+
+    Kabul edilen JSON contract (sağlayıcıdan bağımsız):
+        {
+          "event": "payment.succeeded" | "status": "paid",
+          "amount": "1500.00",                    -- Decimal-safe string
+          "patient_name": "Ahmet Yılmaz",
+          "guardian_phone": "905321234567",
+          "tax_id": "12345678901",
+          "description": "...",                   -- opsiyonel
+          "appointment_date": "2026-04-30",       -- opsiyonel
+          "collection_key": "pos-tx-9421",        -- idempotency anahtarı
+          "id": "..."                             -- collection_key yoksa fallback
+        }
+
+    Doğrulama: X-Webhook-Signature header'ı (HMAC-SHA256 / PAYMENT_WEBHOOK_SECRET)
+    Yanıt: {"status": "queued"} veya {"status": "ignored"} / 4xx
+    """
+    raw_body = request.get_data()
+    signature = request.headers.get("X-Webhook-Signature", "")
+
+    if not _verify_payment_signature(raw_body, signature):
+        abort(401)
+
+    try:
+        payload = request.get_json(force=True)
+    except Exception:
+        abort(400)
+
+    normalized = _normalize_payment_payload(payload or {})
+    if not normalized:
+        logger.info("Payment webhook ignored (eksik/geçersiz payload).")
+        return jsonify({"status": "ignored"}), 200
+
+    # main.trigger_esmm asenkron olarak background thread'de çalışsın;
+    # webhook isteği bloklamasın (Paraşüt async job 30+s sürebilir).
+    def _process():
+        try:
+            from main import trigger_esmm
+            result = trigger_esmm(
+                patient_name=normalized["patient_name"],
+                guardian_phone=normalized["guardian_phone"],
+                tax_id=normalized["tax_id"],
+                amount=normalized["amount"],
+                description=normalized["description"],
+                appointment_date=normalized["appointment_date"],
+                collection_key=normalized["collection_key"],
+            )
+            logger.info(
+                "Payment webhook → e-SMM tamamlandı: %s", result.get("status")
+            )
+        except Exception as exc:
+            logger.error("Payment webhook → e-SMM hatası: %s", exc)
+
+    import threading
+    threading.Thread(target=_process, daemon=True).start()
+    return jsonify({"status": "queued"}), 202
+
+
 @app.route("/webhook/whatsapp", methods=["POST"])
 def whatsapp_webhook():
     """
