@@ -51,6 +51,12 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 WEBHOOK_LISTEN_PORT = int(os.getenv("WEBHOOK_LISTEN_PORT", "5055"))
 WEBHOOK_PUBLIC_URL = os.getenv("WEBHOOK_PUBLIC_URL", "http://localhost:5055")
 
+# Üretimde imza zorunlu olmalı; sadece geliştirme ortamında
+# WEBHOOK_REQUIRE_SIGNATURE=false ile devre dışı bırakılabilir.
+WEBHOOK_REQUIRE_SIGNATURE = os.getenv("WEBHOOK_REQUIRE_SIGNATURE", "true").lower() in (
+    "1", "true", "yes", "on",
+)
+
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 GOOGLE_TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 GOOGLE_CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
@@ -373,9 +379,26 @@ def _verify_webhook_signature(payload_bytes: bytes, signature_header: str) -> bo
     """
     HMAC-SHA256 ile gelen webhook isteğinin imzasını doğrular.
     Evolution API webhook'u 'X-Webhook-Signature' başlığı gönderir.
+
+    Önceki sürüm: WEBHOOK_SECRET boşsa True dönüyordu — production'da
+    secret set edilmesi unutulduğunda webhook'a herkes POST atabilirdi.
+    Yeni davranış (fail-closed):
+      - WEBHOOK_REQUIRE_SIGNATURE=true (varsayılan) ve secret yoksa
+        log'a kritik uyarı bas, isteği REDDET.
+      - Secret varsa imza karşılaştır.
+      - Sadece geliştirme için WEBHOOK_REQUIRE_SIGNATURE=false ile
+        bilinçli olarak atlanabilir.
     """
     if not WEBHOOK_SECRET:
-        return True  # Secret ayarlanmamışsa doğrulama atlanır (geliştirme ortamı)
+        if WEBHOOK_REQUIRE_SIGNATURE:
+            logger.critical(
+                "WEBHOOK_SECRET ayarlanmamış. Webhook isteği fail-closed reddedildi. "
+                "Yalnızca dev ortamında WEBHOOK_REQUIRE_SIGNATURE=false ile atlayabilirsiniz."
+            )
+            return False
+        logger.warning("WEBHOOK_REQUIRE_SIGNATURE=false → imza doğrulama atlandı (DEV).")
+        return True
+
     expected = hmac.new(
         WEBHOOK_SECRET.encode(), payload_bytes, hashlib.sha256
     ).hexdigest()
