@@ -481,18 +481,33 @@ def poll_and_notify() -> list[dict]:
     Google Calendar'ı tarayarak yeni oluşturulan randevuları tespit eder
     ve her biri için WhatsApp üzerinden anamnez formu gönderir.
 
+    Idempotency: gönderilen her randevu event_id'si SQLite store'a
+    işaretlenir. Sonraki polling döngülerinde aynı veliye tekrar
+    mesaj gönderilmez (önceki sürümde lookback window üst üste
+    bindiğinde duplicate mesaj gidiyordu).
+
     Bu fonksiyon bir cron job veya APScheduler ile periyodik çalıştırılmalıdır.
-    Örn: her 10 dakikada bir → crontab: */10 * * * * python -c "from module3... import poll_and_notify; poll_and_notify()"
     """
+    from state_store import get_default_store
+
+    store = get_default_store()
     service = get_calendar_service()
     new_appointments = fetch_recently_created_appointments(service)
     logger.info("Yeni randevu sayısı: %d", len(new_appointments))
 
     results = []
     for appt in new_appointments:
+        event_id = appt["event_id"]
+
+        # Daha önce mesaj gönderildi mi?
+        if store.is_seen("calendar_event_reminder", event_id):
+            logger.debug("Atlanıyor (zaten bildirildi): %s", event_id)
+            results.append({"appointment_id": event_id, "status": "already_sent"})
+            continue
+
         if not appt["phone"]:
             logger.warning("Telefon numarası bulunamadı: %s", appt["summary"])
-            results.append({"appointment_id": appt["event_id"], "status": "no_phone"})
+            results.append({"appointment_id": event_id, "status": "no_phone"})
             continue
 
         try:
@@ -501,10 +516,17 @@ def poll_and_notify() -> list[dict]:
                 guardian_phone=appt["phone"],
                 appointment_dt=appt["start_dt"],
             )
-            results.append({"appointment_id": appt["event_id"], "status": "sent"})
+            # Mesaj başarılıysa işaretle. Başarısız gönderimler tekrar
+            # denenmek üzere işaretlenmez.
+            store.mark_seen(
+                "calendar_event_reminder",
+                event_id,
+                meta=appt.get("summary", ""),
+            )
+            results.append({"appointment_id": event_id, "status": "sent"})
         except Exception as exc:
             logger.error("Mesaj gönderilemedi [%s]: %s", appt["summary"], exc)
-            results.append({"appointment_id": appt["event_id"], "status": "failed", "error": str(exc)})
+            results.append({"appointment_id": event_id, "status": "failed", "error": str(exc)})
 
     return results
 

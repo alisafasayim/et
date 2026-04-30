@@ -98,7 +98,16 @@ def _audio_inbox_loop():
     Yeni ses dosyası bulunursa:
       1. Modül 1 → transkripsiyon + SOAP JSON
       2. Modül 2 → Notion'a arşivle
+
+    Idempotency: Her ses dosyası içerik SHA-256'sıyla state store'a
+    işaretlenir. Yarıda kalmış (taşınmamış) bir dosya yeniden
+    işlenmez — başka bir hasta için duplicate Notion sayfası
+    oluşmasını engeller.
     """
+    from state_store import file_sha256, get_default_store
+
+    store = get_default_store()
+
     logger.info("[AudioLoop] Başlatıldı | klasör: %s | aralık: %ds",
                 AUDIO_INBOX_DIR, AUDIO_POLL_INTERVAL_SEC)
 
@@ -125,24 +134,50 @@ def _audio_inbox_loop():
 
         for audio_file in audio_files:
             try:
+                file_hash = file_sha256(audio_file)
+
+                # Aynı içerik daha önce işlenmiş mi?
+                if store.is_seen("audio_file", file_hash):
+                    logger.warning(
+                        "[AudioLoop] Dosya daha önce işlenmiş, taşınıyor: %s",
+                        audio_file.name,
+                    )
+                    audio_file.rename(processed_dir / audio_file.name)
+                    continue
+
                 logger.info("[AudioLoop] İşleniyor: %s", audio_file.name)
 
                 # Modül 1: Transkripsiyon + SOAP
                 soap_notes = process_audio_file(audio_file, calendar_service)
 
-                # Modül 2: Her SOAP notu için Notion arşivi
+                # Modül 2: Her SOAP notu için Notion arşivi.
+                # Her appointment_id de ayrıca işaretlenir (M2 idempotency).
                 for soap_note in soap_notes:
+                    appt_key = soap_note.get("appointment_id", "")
+                    if appt_key and store.is_seen("soap_archive", appt_key):
+                        logger.info(
+                            "[AudioLoop] SOAP zaten arşivlenmiş, atlanıyor: %s",
+                            appt_key,
+                        )
+                        continue
                     try:
                         archive_patient_session(
                             soap_note=soap_note,
                             form_id=GOOGLE_ANAMNESIS_FORM_ID,
                             all_form_responses=all_form_responses,
                         )
+                        if appt_key:
+                            store.mark_seen(
+                                "soap_archive",
+                                appt_key,
+                                meta=soap_note.get("patient_name", ""),
+                            )
                     except Exception as exc:
                         logger.error("[AudioLoop] Notion arşiv hatası [%s]: %s",
                                      soap_note.get("patient_name"), exc)
 
-                # İşlenen dosyayı taşı
+                # Tüm SOAP'lar işlendi → ses dosyasını taşı + işaretle
+                store.mark_seen("audio_file", file_hash, meta=audio_file.name)
                 audio_file.rename(processed_dir / audio_file.name)
 
             except Exception as exc:
@@ -196,15 +231,24 @@ def trigger_esmm(
     amount,  # Decimal | float | int | str — CollectionRecord.__post_init__ Decimal'a çevirir
     description: str = "Çocuk ve Ergen Psikiyatrisi Muayenesi",
     appointment_date: str = "",
+    collection_key: str = "",
 ) -> dict:
     """
     Tahsilat sonrası çağrılan fonksiyon.
     Modül 4'ü tetikler: e-SMM kes → PDF çek → WhatsApp ile ilet.
 
-    Örnek kullanım (dışarıdan):
-        from main import trigger_esmm
-        trigger_esmm("Ahmet Yılmaz", "05321234567", "12345678901", 1500.0)
+    collection_key: Aynı tahsilatın iki kez fatura kesilmesini engelleyen
+    idempotency anahtarı. Verilmezse tax_id+date+amount'tan üretilir.
+    Yine de POS/manuel tetikleyicinin gerçek tahsilat ID'sini geçmesi
+    en güvenlisi.
+
+    Örnek:
+        trigger_esmm("Ahmet Y.", "05321234567", "12345678901", "1500.00",
+                     collection_key="pos-tx-9421")
     """
+    from state_store import get_default_store
+
+    store = get_default_store()
     record = CollectionRecord(
         patient_name=patient_name,
         guardian_phone=guardian_phone,
@@ -213,7 +257,21 @@ def trigger_esmm(
         description=description,
         appointment_date=appointment_date,
     )
-    return process_collection(record)
+
+    key = collection_key or f"{tax_id}:{appointment_date}:{record.amount}"
+    if not store.claim("esmm_invoice", key, meta=patient_name):
+        logger.warning(
+            "trigger_esmm | Bu tahsilat (%s) için e-SMM zaten kesilmiş; atlandı.",
+            key,
+        )
+        return {"status": "duplicate_skipped", "key": key, "patient": patient_name}
+
+    try:
+        return process_collection(record)
+    except Exception:
+        # Başarısız çağrıyı yeniden denemeye izin vermek için claim'i geri al
+        store.forget("esmm_invoice", key)
+        raise
 
 
 # ---------------------------------------------------------------------------
