@@ -63,7 +63,18 @@ WEBHOOK_REQUIRE_SIGNATURE = os.getenv("WEBHOOK_REQUIRE_SIGNATURE", "true").lower
 
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 GOOGLE_TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
-GOOGLE_CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+# İptal mesajı geldiğinde Calendar event'i silmek istiyorsanız
+# CALENDAR_AUTO_DELETE_ON_CANCEL=true yapın — yazılabilir scope gerekir.
+# Bu değişiklik OAuth onayını yeniler (token.json silinmeli).
+CALENDAR_AUTO_DELETE_ON_CANCEL = os.getenv(
+    "CALENDAR_AUTO_DELETE_ON_CANCEL", "false"
+).lower() in ("1", "true", "yes", "on")
+
+GOOGLE_CALENDAR_SCOPES = (
+    ["https://www.googleapis.com/auth/calendar.events"]
+    if CALENDAR_AUTO_DELETE_ON_CANCEL
+    else ["https://www.googleapis.com/auth/calendar.readonly"]
+)
 GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 
 # Yeni randevu taraması için kaç dakika öncesini kontrol et
@@ -383,24 +394,103 @@ def classify_incoming_message(message_text: str) -> str:
     return "other"
 
 
+def find_upcoming_appointment_by_phone(
+    sender_phone: str,
+    lookahead_days: int = 30,
+) -> dict | None:
+    """
+    Verilen veli telefonunun yaklaşan randevusunu bulur.
+    Calendar etkinliği açıklamasındaki "Tel: ..." satırı üzerinden
+    eşleştirme yapılır. Birden fazla varsa EN YAKININI döner.
+    """
+    normalized = _normalize_phone(sender_phone)
+    service = get_calendar_service()
+    now = datetime.now(tz=timezone.utc)
+    upcoming = fetch_upcoming_appointments(
+        service,
+        window_start=now,
+        window_end=now + timedelta(days=lookahead_days),
+    )
+    for appt in sorted(upcoming, key=lambda a: a["start_dt"]):
+        appt_phone_normalized = _normalize_phone(appt.get("phone", ""))
+        if appt_phone_normalized and appt_phone_normalized == normalized:
+            return appt
+    return None
+
+
+def delete_calendar_event(event_id: str) -> bool:
+    """
+    Calendar etkinliğini siler. CALENDAR_AUTO_DELETE_ON_CANCEL=false
+    ise no-op (False döner). Read-only scope'la çağrılırsa Google
+    HttpError fırlatır — caller yakalamalı.
+    """
+    if not CALENDAR_AUTO_DELETE_ON_CANCEL:
+        logger.info(
+            "Calendar event silme atlandı (CALENDAR_AUTO_DELETE_ON_CANCEL=false): %s",
+            event_id,
+        )
+        return False
+    service = get_calendar_service()
+    service.events().delete(calendarId=GOOGLE_CALENDAR_ID, eventId=event_id).execute()
+    logger.info("Calendar event silindi: %s", event_id)
+    return True
+
+
 def handle_cancellation_request(sender_phone: str, message_text: str) -> None:
     """
-    İptal talebini loglar ve doktora bildirim mesajı gönderir.
+    İptal talebini işler:
+      1. Veliye onay mesajı gönder
+      2. Calendar'da yaklaşan randevuyu bul (telefon üzerinden)
+      3. CALENDAR_AUTO_DELETE_ON_CANCEL=true ise event'i sil; aksi
+         halde sadece doktora bildirim gönder
+      4. Doktora özet bildirim (slot bilgisiyle)
     """
     doctor_phone = os.getenv("DOCTOR_PHONE", "")
     logger.warning("İPTAL TALEBİ | Gönderen: %s | Mesaj: %s", sender_phone, message_text)
 
-    # Gönderene otomatik yanıt
+    # 1. Gönderene otomatik yanıt
     send_whatsapp_message(
         sender_phone,
-        "İptal talebiniz alındı. En kısa sürede sizinle iletişime geçeceğiz.",
+        "İptal talebiniz alındı. Size en kısa sürede dönüş yapılacaktır.",
     )
 
-    # Doktora bildirim
+    # 2. Yaklaşan randevuyu bul
+    appointment_info = ""
+    deleted = False
+    try:
+        appt = find_upcoming_appointment_by_phone(sender_phone)
+        if appt:
+            appt_str = appt["start_dt"].astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+            appointment_info = (
+                f"\nTespit edilen randevu: {appt.get('summary', '—')} ({appt_str})"
+            )
+            # 3. Otomatik silme açıksa
+            try:
+                deleted = delete_calendar_event(appt["event_id"])
+            except Exception as exc:
+                logger.error("Event silme hatası [%s]: %s", appt["event_id"], exc)
+                appointment_info += f"\n⚠️ Otomatik silme başarısız: {exc}"
+        else:
+            appointment_info = "\n(Bu telefona kayıtlı yaklaşan randevu bulunamadı)"
+    except Exception as exc:
+        logger.error("Yaklaşan randevu arama hatası: %s", exc)
+
+    # 4. Doktora bildirim
     if doctor_phone:
+        status_note = (
+            "Slot otomatik boşaltıldı."
+            if deleted
+            else "Calendar'dan manuel iptal gerekli."
+        )
         send_whatsapp_message(
             doctor_phone,
-            f"⚠️ İptal Talebi\nNumara: +{_normalize_phone(sender_phone)}\nMesaj: {message_text}",
+            (
+                f"⚠️ İptal Talebi\n"
+                f"Numara: +{_normalize_phone(sender_phone)}\n"
+                f"Mesaj: {message_text}"
+                f"{appointment_info}\n"
+                f"{status_note}"
+            ),
         )
 
 
