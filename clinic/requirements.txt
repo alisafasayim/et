@@ -1,3 +1,8 @@
+# Ortak
+python-dotenv>=1.0.1
+tenacity>=8.5.0
+cryptography>=42.0.0
+
 # Modül 1 - Transkripsiyon ve Hasta Eşleştirme
 tinytag>=1.10.1
 faster-whisper>=1.0.3
@@ -21,3 +26,7 @@ flask>=3.0.3
 # Modül 5 - Samsung Notes Migrasyonu
 python-docx>=1.1.2
 markdown-it-py>=3.0.0
+
+# Test
+pytest>=8.3.0
+pytest-mock>=3.14.0

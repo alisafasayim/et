@@ -1,0 +1,89 @@
+{% extends "admin/base.html" %}
+{% block title %}{{ patient.full_name }} — Klinik Admin{% endblock %}
+{% block content %}
+<a href="{{ url_for('admin_ui.patients') }}" class="muted">← Hasta listesi</a>
+<h1>{{ patient.full_name }} <span class="pseudo" style="font-size: 18px;">{{ patient.pseudonym }}</span></h1>
+
+<div class="grid cols-2">
+  <div class="card">
+    <h2>Kimlik Bilgileri (yerel, şifreli)</h2>
+    <table>
+      <tr><th>UUID</th><td><code>{{ patient.uuid }}</code></td></tr>
+      <tr><th>Ad Soyad</th><td>{{ patient.full_name }}</td></tr>
+      <tr><th>TCKN / VKN</th><td><code>{{ patient.tax_id or '—' }}</code></td></tr>
+      <tr><th>Telefon</th><td>{{ patient.phone or '—' }}</td></tr>
+      <tr><th>Doğum Tarihi</th><td>{{ patient.birth_date or '—' }}</td></tr>
+      <tr><th>Notion Sayfa</th>
+        <td>
+          {% if patient.notion_page_id %}
+            <code>{{ patient.notion_page_id }}</code>
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+      <tr><th>Kayıt</th><td>{{ patient.created_at }}</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>KVKK İşlemleri</h2>
+    <p>
+      <strong>Açık Rıza:</strong>
+      {% if patient.consent_at %}
+        <span class="badge ok">{{ patient.consent_at[:19] }}</span>
+      {% else %}
+        <span class="badge warn">Henüz alınmadı</span>
+      {% endif %}
+    </p>
+    <form method="post" action="{{ url_for('admin_ui.patient_consent', patient_uuid=patient.uuid) }}"
+          style="display: inline; margin-right: 8px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% if patient.consent_at %}
+        <input type="hidden" name="action" value="revoke">
+        <button type="submit" class="btn secondary">Rızayı Geri Çek</button>
+      {% else %}
+        <input type="hidden" name="action" value="grant">
+        <button type="submit">Açık Rıza Kaydet</button>
+      {% endif %}
+    </form>
+
+    <hr style="margin: 20px 0; border: none; border-top: 1px solid var(--border);">
+    <p class="muted">
+      <strong>Unutulma Hakkı (KVKK m.7):</strong> Yerel kayıt fiziksel olarak silinir.
+      Notion sayfası elle silinmelidir.
+    </p>
+    <form method="post" action="{{ url_for('admin_ui.patient_delete', patient_uuid=patient.uuid) }}"
+          onsubmit="return confirm('Bu hastanın yerel kaydı kalıcı olarak silinecek. Emin misiniz?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn danger">Hastayı Sil</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Audit Geçmişi</h2>
+  {% if events %}
+  <table>
+    <thead>
+      <tr>
+        <th>Zaman</th>
+        <th>Eylem</th>
+        <th>Aktör</th>
+        <th>Detaylar</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in events %}
+      <tr>
+        <td><code>{{ e.ts[:19] }}</code></td>
+        <td><strong>{{ e.action }}</strong></td>
+        <td>{{ e.actor }}</td>
+        <td>{% if e.details %}<code>{{ e.details }}</code>{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Bu hasta için audit kaydı yok</div>
+  {% endif %}
+</div>
+{% endblock %}

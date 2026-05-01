@@ -1,0 +1,88 @@
+{% extends "admin/base.html" %}
+{% block title %}Hastalar — Klinik Admin{% endblock %}
+{% block content %}
+<h1>Hastalar</h1>
+
+<div class="filters">
+  <form method="get" style="display: flex; gap: 8px; align-items: end;">
+    <div>
+      <label for="q">Ara (ad veya TCKN)</label>
+      <input type="text" name="q" id="q" value="{{ query }}" style="min-width: 280px;">
+    </div>
+    <button type="submit">Ara</button>
+    {% if query %}<a href="{{ url_for('admin_ui.patients') }}" class="btn secondary">Temizle</a>{% endif %}
+  </form>
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <h2>{% if query %}Arama Sonuçları{% else %}Son 200 Kayıt{% endif %}</h2>
+    {% if patients %}
+    <table>
+      <thead>
+        <tr>
+          <th>Pseudonym</th>
+          <th>Ad Soyad</th>
+          <th>Telefon</th>
+          <th>Onam</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in patients %}
+        <tr>
+          <td>
+            <a href="{{ url_for('admin_ui.patient_detail', patient_uuid=p.uuid) }}"
+               class="pseudo">{{ p.pseudonym }}</a>
+          </td>
+          <td>{{ p.full_name }}</td>
+          <td>{{ p.phone or '—' }}</td>
+          <td>
+            {% if p.consent_at %}
+              <span class="badge ok">Onaylı</span>
+            {% else %}
+              <span class="badge warn">Onam Yok</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">
+      {% if query %}Sonuç bulunamadı{% else %}Henüz hasta kaydı yok{% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Yeni Hasta Kaydet</h2>
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="row">
+        <label for="full_name">Ad Soyad *</label>
+        <input type="text" name="full_name" id="full_name" required>
+      </div>
+      <div class="row">
+        <label for="tax_id">TCKN / VKN</label>
+        <input type="text" name="tax_id" id="tax_id" inputmode="numeric"
+               pattern="[0-9]*" maxlength="11">
+      </div>
+      <div class="row">
+        <label for="phone">Telefon</label>
+        <input type="text" name="phone" id="phone">
+      </div>
+      <div class="row">
+        <label for="birth_date">Doğum Tarihi</label>
+        <input type="date" name="birth_date" id="birth_date">
+      </div>
+      <div class="row">
+        <label>
+          <input type="checkbox" name="consent_now" value="1">
+          Açık rıza alındı (KVKK m.5/2)
+        </label>
+      </div>
+      <button type="submit">Kaydet</button>
+    </form>
+  </div>
+</div>
+{% endblock %}
