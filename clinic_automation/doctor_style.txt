@@ -1,0 +1,9 @@
+Bu dosyaya doktorun WhatsApp'taki yazış tarzını gösteren örnek mesajlar yazın.
+Bot bu tarzı taklit edecek.
+
+Örnek format (bunları kendi mesajlarınızla değiştirin):
+---
+Merhaba, randevunuz 15 Nisan Salı saat 14:00'te. Görüşmek üzere.
+İlacı sabah aç karnına verin, 2 hafta sonra kontrol edelim.
+Formu randevudan önce doldurmanız önemli, değerlendirmemizi hızlandırır.
+Geçmiş olsun, herhangi bir değişiklik olursa yazın bana.
