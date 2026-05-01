@@ -155,6 +155,11 @@ def match_appointments(recorded_at: datetime, appointments: list[dict]) -> list[
     Ses kaydının saatine yakın (±APPOINTMENT_MATCH_WINDOW_MINUTES) randevuları döner.
     Tüm karşılaştırmalar aware datetime üzerinden yapılır; recorded_at
     naive gelirse klinik yerel TZ kabul edilir.
+
+    Bu basit time-window eşleştirmesi — çoklu hasta segmentasyonu,
+    parçalı kayıt birleştirmesi gibi gelişmiş senaryolar için
+    smart_matcher.SmartMatcher.match_audio() kullanın (full transkript
+    + üç-kaynak çapraz referans gerektirir).
     """
     if recorded_at.tzinfo is None:
         recorded_at = recorded_at.replace(tzinfo=CLINIC_TZ)
@@ -168,6 +173,62 @@ def match_appointments(recorded_at: datetime, appointments: list[dict]) -> list[
         if abs(recorded_at - appt_start) <= window:
             matched.append(appt)
     return matched
+
+
+def smart_match_audio_to_patients(
+    file_path: Path,
+    transcription_segments: list[dict],
+    full_transcript_text: str,
+    appointments: list[dict],
+    recorded_at: datetime,
+):
+    """
+    Smart matcher köprüsü: Modül 1'in dict-tabanlı çıktılarını
+    smart_matcher'in dataclass arayüzüne adapte eder, sonra
+    match_audio() çağırır.
+
+    Geriye smart_matcher.MatchResult döner. Çoklu hasta + parçalı
+    kayıt + isimsiz dosya senaryolarında detect_session_segments()
+    LLM çağrısına alternatif olarak kullanılabilir.
+
+    Şu an opsiyonel — process_audio_file LLM-tabanlı detect'i
+    çağırıyor. SMART_MATCHER_ENABLED=true ile aktive edilebilir.
+    """
+    from clinic_helpers import (
+        Appointment,
+        TranscriptionResult,
+        TranscriptionSegment,
+    )
+    from smart_matcher import SmartMatcher
+
+    appts_dc = [
+        Appointment(
+            patient_name=a.get("summary", ""),
+            start_time=a["start_dt"],
+            end_time=a.get(
+                "end_dt", a["start_dt"] + timedelta(minutes=45)
+            ),
+            summary=a.get("summary", ""),
+            event_id=a.get("event_id", ""),
+        )
+        for a in appointments
+    ]
+    transcription_dc = TranscriptionResult(
+        audio_path=str(file_path),
+        full_text=full_transcript_text,
+        segments=[TranscriptionSegment.from_dict(s) for s in transcription_segments],
+        duration_seconds=transcription_segments[-1]["end"]
+        if transcription_segments
+        else 0.0,
+        language="tr",
+    )
+    audio_metadata = {
+        "file_path": str(file_path),
+        "recorded_at": recorded_at,
+        "duration": transcription_dc.duration_seconds,
+    }
+    matcher = SmartMatcher()
+    return matcher.match_audio(transcription_dc, appts_dc, audio_metadata)
 
 
 # ---------------------------------------------------------------------------
