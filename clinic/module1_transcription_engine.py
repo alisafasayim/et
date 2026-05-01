@@ -206,11 +206,44 @@ def _get_diarization_pipeline() -> Pipeline:
     return _diarization_pipeline
 
 
+def _maybe_preprocess(file_path: Path) -> Path:
+    """
+    AUDIO_PREPROCESS_ENABLED=true ise sesi WAV'a normalize edip kalite
+    kontrolü yapar. pydub veya audio_preprocessing yüklü değilse veya
+    feature kapalıysa orijinal dosya yolunu döner (no-op).
+
+    Yüksek gürültülü m4a/mp3 dosyalarında transkripsiyon kalitesini
+    artırır; sessiz başlangıç/bitiş kısımları kırpılır.
+    """
+    if os.getenv("AUDIO_PREPROCESS_ENABLED", "false").lower() not in (
+        "1", "true", "yes", "on",
+    ):
+        return file_path
+    try:
+        from audio_preprocessing import AudioPreprocessor
+    except ImportError:
+        print("[Audio] audio_preprocessing modülü yüklü değil, atlanıyor")
+        return file_path
+    try:
+        preprocessor = AudioPreprocessor()
+        out = preprocessor.preprocess(str(file_path))
+        return Path(out)
+    except Exception as exc:
+        # Pipeline başarısızsa orijinalle devam et — fail-soft (transkripsiyon
+        # her halükârda denenmeli, ses kayıtları kıymetli).
+        print(f"[Audio] Ön-işleme başarısız (orijinalle devam): {exc}")
+        return file_path
+
+
 def transcribe_audio(file_path: Path) -> list[dict]:
     """
     faster-whisper ile transkripsiyon yapar.
     Her segment için başlangıç/bitiş süresi ve metni döner.
+
+    AUDIO_PREPROCESS_ENABLED=true iken önce normalize/gürültü-azalt
+    pipeline'ından geçirilir (pydub bağımlı).
     """
+    file_path = _maybe_preprocess(file_path)
     model = _get_whisper_model()
     segments, info = model.transcribe(str(file_path), beam_size=5, language="tr")
 

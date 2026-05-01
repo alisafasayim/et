@@ -30,3 +30,6 @@ markdown-it-py>=3.0.0
 # Test
 pytest>=8.3.0
 pytest-mock>=3.14.0
+
+# Audio preprocessing (Modül 1 pipeline'ı için opsiyonel)
+pydub>=0.25.1
