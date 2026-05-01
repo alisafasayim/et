@@ -63,11 +63,11 @@ def test_health_accepts_bearer_token(admin_client):
     assert body["services"]["whatsapp"]["state"] == "open"
 
 
-def test_health_accepts_query_token(admin_client):
+def test_health_rejects_query_token(admin_client):
     with patch("module3_whatsapp_communicator.get_instance_status",
                return_value={"instance": {"state": "open"}}):
         resp = admin_client.get("/admin/health?token=secret-admin")
-    assert resp.status_code == 200
+    assert resp.status_code == 401
 
 
 def test_health_rejects_wrong_token(admin_client):

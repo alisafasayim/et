@@ -52,6 +52,26 @@ def test_meta_is_persisted(store, tmp_path):
     assert fresh.is_seen("ns", "k") is True
 
 
+def test_job_lifecycle(store):
+    assert store.enqueue_job("payment", "job-1", '{"amount":"100"}') is True
+    assert store.enqueue_job("payment", "job-1", "{}") is False
+
+    job = store.claim_job("payment", "job-1")
+    assert job["status"] == "running"
+    assert job["attempts"] == 1
+
+    store.complete_job("payment", "job-1", result='{"status":"done"}')
+    assert store.get_job("payment", "job-1")["status"] == "done"
+
+
+def test_claim_next_job_is_fifo(store):
+    store.enqueue_job("payment", "job-1", "{}")
+    store.enqueue_job("payment", "job-2", "{}")
+    assert store.claim_next_job("payment")["job_id"] == "job-1"
+    assert store.claim_next_job("payment")["job_id"] == "job-2"
+    assert store.claim_next_job("payment") is None
+
+
 def test_file_sha256_is_stable(tmp_path):
     f = tmp_path / "x.bin"
     f.write_bytes(b"hello world")

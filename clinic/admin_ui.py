@@ -32,8 +32,10 @@ Güvenlik:
 import logging
 import os
 import secrets
+import time
 from functools import wraps
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from flask import (
     Blueprint,
@@ -51,6 +53,8 @@ logger = logging.getLogger("admin_ui")
 
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 WEBHOOK_PUBLIC_URL = os.getenv("WEBHOOK_PUBLIC_URL", "")
+LOGIN_MAX_FAILURES = int(os.getenv("ADMIN_LOGIN_MAX_FAILURES", "5"))
+LOGIN_LOCKOUT_SECONDS = int(os.getenv("ADMIN_LOGIN_LOCKOUT_SECONDS", "900"))
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 
@@ -60,6 +64,8 @@ bp = Blueprint(
     url_prefix="/ui",
     template_folder=str(TEMPLATE_DIR),
 )
+
+_login_failures: dict[str, list[float]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +111,48 @@ def _validate_csrf() -> None:
         abort(403, "CSRF doğrulama başarısız")
 
 
+def _safe_next_url(target: str | None) -> str:
+    """Allow redirects only inside the admin UI."""
+    default = url_for("admin_ui.dashboard")
+    if not target:
+        return default
+    parsed = urlsplit(target)
+    if parsed.scheme or parsed.netloc:
+        return default
+    if not parsed.path.startswith("/ui"):
+        return default
+    return target
+
+
+def _login_key() -> str:
+    return request.remote_addr or "unknown"
+
+
+def _prune_login_failures(key: str, now: float | None = None) -> list[float]:
+    now = time.time() if now is None else now
+    cutoff = now - LOGIN_LOCKOUT_SECONDS
+    failures = [ts for ts in _login_failures.get(key, []) if ts >= cutoff]
+    if failures:
+        _login_failures[key] = failures
+    else:
+        _login_failures.pop(key, None)
+    return failures
+
+
+def _login_locked(key: str) -> bool:
+    return len(_prune_login_failures(key)) >= LOGIN_MAX_FAILURES
+
+
+def _record_login_failure(key: str) -> None:
+    failures = _prune_login_failures(key)
+    failures.append(time.time())
+    _login_failures[key] = failures
+
+
+def _clear_login_failures(key: str) -> None:
+    _login_failures.pop(key, None)
+
+
 # ---------------------------------------------------------------------------
 # Login / Logout
 # ---------------------------------------------------------------------------
@@ -115,8 +163,13 @@ def login():
         abort(404)
 
     if request.method == "POST":
+        key = _login_key()
+        if _login_locked(key):
+            abort(429, "Too many login attempts")
+
         token = request.form.get("token", "")
         if token == ADMIN_TOKEN:
+            _clear_login_failures(key)
             session.clear()
             session["admin_authenticated"] = True
             session.permanent = True
@@ -125,7 +178,7 @@ def login():
                 audit("admin_ui.login_ok", actor="admin_ui")
             except Exception:
                 pass
-            next_url = request.args.get("next", url_for("admin_ui.dashboard"))
+            next_url = _safe_next_url(request.args.get("next"))
             return redirect(next_url)
         try:
             from audit_log import audit
@@ -133,6 +186,7 @@ def login():
                   details={"ip": request.remote_addr})
         except Exception:
             pass
+        _record_login_failure(key)
         flash("Geçersiz token", "error")
     return render_template("admin/login.html")
 

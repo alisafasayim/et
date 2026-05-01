@@ -26,8 +26,16 @@ def test_verify_push_token_fails_on_mismatch(cw):
     assert cw.verify_push_token("wrong") is False
 
 
-def test_verify_push_token_no_token_skip(monkeypatch):
+def test_verify_push_token_no_token_fails_closed(monkeypatch):
     monkeypatch.delenv("CALENDAR_PUSH_TOKEN", raising=False)
+    import importlib, calendar_watch
+    importlib.reload(calendar_watch)
+    assert calendar_watch.verify_push_token("anything") is False
+
+
+def test_verify_push_token_no_token_can_skip_in_dev(monkeypatch):
+    monkeypatch.delenv("CALENDAR_PUSH_TOKEN", raising=False)
+    monkeypatch.setenv("CALENDAR_REQUIRE_PUSH_TOKEN", "false")
     import importlib, calendar_watch
     importlib.reload(calendar_watch)
     assert calendar_watch.verify_push_token("anything") is True

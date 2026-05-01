@@ -12,7 +12,7 @@ Mevcut Flask webhook sunucusuna ek endpoint'ler ekler:
 
 Auth: ADMIN_TOKEN env değişkeni; her istekte
     Authorization: Bearer <token>
-veya ?token=... query string. Set edilmemişse panel devre dışı (404).
+Set edilmemişse panel devre dışı (404).
 """
 
 import logging
@@ -43,8 +43,6 @@ def _require_admin(view):
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
             provided = auth[7:]
-        elif request.args.get("token"):
-            provided = request.args["token"]
         if provided != ADMIN_TOKEN:
             abort(401)
         # Audit: admin paneli erişimi

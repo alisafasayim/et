@@ -78,10 +78,29 @@ def test_login_with_correct_token_succeeds(client):
     assert "/ui/" in resp.headers["Location"]
 
 
+def test_login_rejects_external_next_url(client):
+    resp = client.post(
+        "/ui/login?next=https://evil.example/phish",
+        data={"token": "secret-admin"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith("/ui/")
+
+
 def test_login_with_wrong_token_fails(client):
     resp = client.post("/ui/login", data={"token": "wrong"})
     assert resp.status_code == 200  # Login formu tekrar render edilir
     assert b"ge" in resp.data.lower()  # "geçersiz" mesajı (HTML escape'le)
+
+
+def test_login_lockout_after_repeated_failures(client):
+    for _ in range(5):
+        resp = client.post("/ui/login", data={"token": "wrong"})
+        assert resp.status_code == 200
+
+    resp = client.post("/ui/login", data={"token": "secret-admin"})
+    assert resp.status_code == 429
 
 
 def test_dashboard_renders_after_login(client, monkeypatch):

@@ -20,6 +20,7 @@ import hmac
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -79,6 +80,10 @@ GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 
 # Yeni randevu taraması için kaç dakika öncesini kontrol et
 CALENDAR_POLL_LOOKBACK_MINUTES = int(os.getenv("CALENDAR_POLL_LOOKBACK_MINUTES", "10"))
+PAYMENT_JOB_KIND = "payment_esmm"
+PAYMENT_JOB_STALE_SECONDS = int(os.getenv("PAYMENT_JOB_STALE_SECONDS", "1800"))
+PAYMENT_JOB_POLL_LIMIT = int(os.getenv("PAYMENT_JOB_POLL_LIMIT", "5"))
+PAYMENT_JOB_PAYLOAD_PREFIX = "fernet:"
 
 # ---------------------------------------------------------------------------
 # 1. Evolution API – Düşük Seviye HTTP İstemcisi
@@ -614,6 +619,85 @@ def _normalize_payment_payload(raw: dict) -> dict | None:
     }
 
 
+def _payment_job_id(normalized: dict, raw_body: bytes) -> str:
+    job_id = normalized.get("collection_key") or hashlib.sha256(raw_body).hexdigest()
+    normalized["collection_key"] = job_id
+    return job_id
+
+
+def _encode_payment_job_payload(normalized: dict) -> str:
+    from pii_crypto import encrypt
+
+    plaintext = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+    return PAYMENT_JOB_PAYLOAD_PREFIX + encrypt(plaintext)
+
+
+def _decode_payment_job_payload(stored_payload: str) -> dict:
+    if stored_payload.startswith(PAYMENT_JOB_PAYLOAD_PREFIX):
+        from pii_crypto import decrypt
+
+        encrypted = stored_payload[len(PAYMENT_JOB_PAYLOAD_PREFIX):]
+        return json.loads(decrypt(encrypted))
+    return json.loads(stored_payload)
+
+
+def _process_claimed_payment_job(store, job: dict) -> dict:
+    job_id = job["job_id"]
+    try:
+        payload = _decode_payment_job_payload(job["payload"])
+        from main import trigger_esmm
+        result = trigger_esmm(
+            patient_name=payload["patient_name"],
+            guardian_phone=payload["guardian_phone"],
+            tax_id=payload["tax_id"],
+            amount=payload["amount"],
+            description=payload["description"],
+            appointment_date=payload["appointment_date"],
+            collection_key=payload["collection_key"],
+        )
+        store.complete_job(
+            PAYMENT_JOB_KIND,
+            job_id,
+            result=json.dumps(result, ensure_ascii=False, default=str),
+        )
+        logger.info("Payment job completed: %s | status=%s", job_id, result.get("status"))
+        return {"job_id": job_id, "status": "done", "result": result}
+    except Exception as exc:
+        store.fail_job(PAYMENT_JOB_KIND, job_id, str(exc))
+        logger.error("Payment job failed [%s]: %s", job_id, exc)
+        return {"job_id": job_id, "status": "failed", "error": str(exc)}
+
+
+def process_payment_job(job_id: str) -> dict:
+    """Claim and process one queued payment job by id."""
+    from state_store import get_default_store
+
+    store = get_default_store()
+    job = store.claim_job(PAYMENT_JOB_KIND, job_id)
+    if not job:
+        existing = store.get_job(PAYMENT_JOB_KIND, job_id)
+        return existing or {"job_id": job_id, "status": "missing"}
+    return _process_claimed_payment_job(store, job)
+
+
+def poll_payment_jobs(limit: int = PAYMENT_JOB_POLL_LIMIT) -> list[dict]:
+    """Process queued payment jobs, including stale jobs from a crashed worker."""
+    from state_store import get_default_store
+
+    store = get_default_store()
+    requeued = store.requeue_stale_jobs(PAYMENT_JOB_KIND, PAYMENT_JOB_STALE_SECONDS)
+    if requeued:
+        logger.warning("Requeued %d stale payment job(s)", requeued)
+
+    results = []
+    for _ in range(limit):
+        job = store.claim_next_job(PAYMENT_JOB_KIND)
+        if not job:
+            break
+        results.append(_process_claimed_payment_job(store, job))
+    return results
+
+
 @app.route("/webhook/payment", methods=["POST"])
 def payment_webhook():
     """
@@ -651,29 +735,22 @@ def payment_webhook():
         logger.info("Payment webhook ignored (eksik/geçersiz payload).")
         return jsonify({"status": "ignored"}), 200
 
-    # main.trigger_esmm asenkron olarak background thread'de çalışsın;
-    # webhook isteği bloklamasın (Paraşüt async job 30+s sürebilir).
-    def _process():
-        try:
-            from main import trigger_esmm
-            result = trigger_esmm(
-                patient_name=normalized["patient_name"],
-                guardian_phone=normalized["guardian_phone"],
-                tax_id=normalized["tax_id"],
-                amount=normalized["amount"],
-                description=normalized["description"],
-                appointment_date=normalized["appointment_date"],
-                collection_key=normalized["collection_key"],
-            )
-            logger.info(
-                "Payment webhook → e-SMM tamamlandı: %s", result.get("status")
-            )
-        except Exception as exc:
-            logger.error("Payment webhook → e-SMM hatası: %s", exc)
+    from state_store import get_default_store
 
-    import threading
-    threading.Thread(target=_process, daemon=True).start()
-    return jsonify({"status": "queued"}), 202
+    job_id = _payment_job_id(normalized, raw_body)
+    try:
+        job_payload = _encode_payment_job_payload(normalized)
+    except EnvironmentError as exc:
+        logger.critical("Payment job payload encryption unavailable: %s", exc)
+        return jsonify({"status": "configuration_error"}), 503
+    store = get_default_store()
+
+    if not store.enqueue_job(PAYMENT_JOB_KIND, job_id, job_payload):
+        existing = store.get_job(PAYMENT_JOB_KIND, job_id) or {"status": "queued"}
+        return jsonify({"status": f"already_{existing['status']}", "job_id": job_id}), 200
+
+    threading.Thread(target=process_payment_job, args=(job_id,), daemon=True).start()
+    return jsonify({"status": "queued", "job_id": job_id}), 202
 
 
 @app.route("/webhook/calendar", methods=["POST"])

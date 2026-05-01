@@ -30,6 +30,9 @@ logger = logging.getLogger("calendar_watch")
 CALENDAR_PUSH_ENABLED = os.getenv("CALENDAR_PUSH_ENABLED", "false").lower() in (
     "1", "true", "yes", "on",
 )
+CALENDAR_REQUIRE_PUSH_TOKEN = os.getenv("CALENDAR_REQUIRE_PUSH_TOKEN", "true").lower() not in (
+    "0", "false", "no", "off",
+)
 WEBHOOK_PUBLIC_URL = os.getenv("WEBHOOK_PUBLIC_URL", "")
 GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 # Push bildirim token'ı (Google bizim verdiğimiz değeri her POST'ta
@@ -207,7 +210,14 @@ def verify_push_token(received_token: str) -> bool:
     set edilmişse bu kontrol fail-closed çalışır.
     """
     if not CALENDAR_PUSH_TOKEN:
-        return True  # Token kullanılmıyor; signature check atlanır
+        if CALENDAR_REQUIRE_PUSH_TOKEN:
+            logger.critical(
+                "CALENDAR_PUSH_TOKEN is not configured; rejecting calendar push fail-closed. "
+                "Set CALENDAR_REQUIRE_PUSH_TOKEN=false only for local development."
+            )
+            return False
+        logger.warning("CALENDAR_REQUIRE_PUSH_TOKEN=false; skipping push token check (dev only).")
+        return True
     return received_token == CALENDAR_PUSH_TOKEN
 
 

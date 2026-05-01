@@ -68,6 +68,25 @@ class StateStore:
                 )
                 """
             )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS jobs (
+                    kind       TEXT NOT NULL,
+                    job_id     TEXT NOT NULL,
+                    payload    TEXT NOT NULL,
+                    status     TEXT NOT NULL DEFAULT 'queued',
+                    attempts   INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (kind, job_id)
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_status "
+                "ON jobs(kind, status, created_at)"
+            )
 
     @contextmanager
     def _cursor(self) -> Iterator[sqlite3.Cursor]:
@@ -130,6 +149,139 @@ class StateStore:
                 (namespace, key),
             )
 
+    # ----- Durable jobs -----
+
+    @staticmethod
+    def _job_from_row(row) -> Optional[dict]:
+        if row is None:
+            return None
+        return {
+            "kind": row[0],
+            "job_id": row[1],
+            "payload": row[2],
+            "status": row[3],
+            "attempts": row[4],
+            "last_error": row[5],
+            "created_at": row[6],
+            "updated_at": row[7],
+        }
+
+    def enqueue_job(self, kind: str, job_id: str, payload: str) -> bool:
+        """Persist a queued job. Returns False when it already exists."""
+        with self._cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO jobs (kind, job_id, payload, status)
+                    VALUES (?, ?, ?, 'queued')
+                    """,
+                    (kind, job_id, payload),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def get_job(self, kind: str, job_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT kind, job_id, payload, status, attempts, last_error,
+                       created_at, updated_at
+                FROM jobs
+                WHERE kind=? AND job_id=?
+                LIMIT 1
+                """,
+                (kind, job_id),
+            )
+            return self._job_from_row(cur.fetchone())
+
+    def claim_job(self, kind: str, job_id: str) -> Optional[dict]:
+        """Move one queued job to running and return it."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE jobs
+                SET status='running',
+                    attempts=attempts + 1,
+                    updated_at=datetime('now'),
+                    last_error=NULL
+                WHERE kind=? AND job_id=? AND status='queued'
+                """,
+                (kind, job_id),
+            )
+            if cur.rowcount != 1:
+                return None
+            cur.execute(
+                """
+                SELECT kind, job_id, payload, status, attempts, last_error,
+                       created_at, updated_at
+                FROM jobs
+                WHERE kind=? AND job_id=?
+                """,
+                (kind, job_id),
+            )
+            return self._job_from_row(cur.fetchone())
+
+    def claim_next_job(self, kind: str) -> Optional[dict]:
+        """Claim the oldest queued job of a kind."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                SELECT job_id
+                FROM jobs
+                WHERE kind=? AND status='queued'
+                ORDER BY created_at
+                LIMIT 1
+                """,
+                (kind,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return self.claim_job(kind, row[0])
+
+    def complete_job(self, kind: str, job_id: str, result: str = "") -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE jobs
+                SET status='done',
+                    last_error=?,
+                    updated_at=datetime('now')
+                WHERE kind=? AND job_id=?
+                """,
+                (result, kind, job_id),
+            )
+
+    def fail_job(self, kind: str, job_id: str, error: str) -> None:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE jobs
+                SET status='failed',
+                    last_error=?,
+                    updated_at=datetime('now')
+                WHERE kind=? AND job_id=?
+                """,
+                (error, kind, job_id),
+            )
+
+    def requeue_stale_jobs(self, kind: str, older_than_seconds: int) -> int:
+        """Return stale running jobs to queued."""
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                UPDATE jobs
+                SET status='queued',
+                    updated_at=datetime('now')
+                WHERE kind=?
+                  AND status='running'
+                  AND updated_at <= datetime('now', ?)
+                """,
+                (kind, f"-{older_than_seconds} seconds"),
+            )
+            return cur.rowcount
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -165,3 +317,11 @@ def get_default_store() -> StateStore:
         _default_store = StateStore()
         logger.info("StateStore başlatıldı: %s", _default_store.db_path)
     return _default_store
+
+
+def reset_cache() -> None:
+    """Close and forget the module-level singleton (used by tests)."""
+    global _default_store
+    if _default_store is not None:
+        _default_store.close()
+    _default_store = None

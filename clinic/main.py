@@ -59,6 +59,7 @@ from module3_whatsapp_communicator import (
     get_instance_status,
     poll_anamnesis_followup,
     poll_and_notify,
+    poll_payment_jobs,
     poll_upcoming_reminders,
 )
 from module4_esmm_generator import (
@@ -89,6 +90,7 @@ REMINDER_24H_INTERVAL_SEC = int(os.getenv("REMINDER_24H_INTERVAL_SEC", "900"))  
 REMINDER_1H_INTERVAL_SEC = int(os.getenv("REMINDER_1H_INTERVAL_SEC", "300"))     # 5 dk
 # Anamnez doldurmayan velilere takip mesajı (saatte bir)
 ANAMNESIS_FOLLOWUP_INTERVAL_SEC = int(os.getenv("ANAMNESIS_FOLLOWUP_INTERVAL_SEC", "3600"))
+PAYMENT_JOB_POLL_INTERVAL_SEC = int(os.getenv("PAYMENT_JOB_POLL_INTERVAL_SEC", "60"))
 WEBHOOK_LISTEN_PORT = int(os.getenv("WEBHOOK_LISTEN_PORT", "5055"))
 
 # ---------------------------------------------------------------------------
@@ -162,6 +164,7 @@ def _audio_inbox_loop():
 
                 # Modül 2: Her SOAP notu için Notion arşivi.
                 # Her appointment_id de ayrıca işaretlenir (M2 idempotency).
+                archive_errors = []
                 for soap_note in soap_notes:
                     # Risk alarmı: Notion arşivinden ÖNCE değerlendir;
                     # arşiv hata verirse bile doktora bildirim gitmiş olur.
@@ -214,6 +217,15 @@ def _audio_inbox_loop():
                     except Exception as exc:
                         logger.error("[AudioLoop] Notion arşiv hatası [%s]: %s",
                                      soap_note.get("patient_name"), exc)
+                        archive_errors.append((soap_note.get("patient_name"), str(exc)))
+
+                if archive_errors:
+                    logger.error(
+                        "[AudioLoop] %d Notion archive failure(s); keeping audio in inbox for retry: %s",
+                        len(archive_errors),
+                        audio_file.name,
+                    )
+                    continue
 
                 # Tüm SOAP'lar işlendi → ses dosyasını taşı + işaretle
                 store.mark_seen("audio_file", file_hash, meta=audio_file.name)
@@ -304,6 +316,20 @@ def _anamnesis_followup_loop():
         except Exception as exc:
             logger.error("[AnamnesisFollowup] Hata: %s", exc)
         time.sleep(ANAMNESIS_FOLLOWUP_INTERVAL_SEC)
+
+
+def _payment_jobs_loop():
+    """Persisted payment jobs -> Paraşüt/e-SMM worker."""
+    logger.info("[PaymentJobs] Başlatıldı | aralık: %ds", PAYMENT_JOB_POLL_INTERVAL_SEC)
+    while True:
+        try:
+            results = poll_payment_jobs()
+            processed = sum(1 for r in results if r.get("status") in {"done", "failed"})
+            if processed:
+                logger.info("[PaymentJobs] %d payment job işlendi", processed)
+        except Exception as exc:
+            logger.error("[PaymentJobs] Hata: %s", exc)
+        time.sleep(PAYMENT_JOB_POLL_INTERVAL_SEC)
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +465,7 @@ def start_clinic_system():
         "Reminder24h": _reminder_24h_loop,
         "Reminder1h": _reminder_1h_loop,
         "AnamnesisFollowup": _anamnesis_followup_loop,
+        "PaymentJobs": _payment_jobs_loop,
         "WebhookServer": _webhook_server,
     }
 

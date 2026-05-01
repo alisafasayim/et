@@ -12,6 +12,16 @@ env/
 .mypy_cache/
 
 # Klinik runtime artifacts
+*.env
+.env
+.env.*
+!.env.example
+.encryption_key
+*.key
+*.pem
+credentials.json
+service_account.json
+token.json
 clinic/.env
 clinic/clinic.log
 clinic/clinic_state.db
@@ -28,6 +38,19 @@ clinic/audio_processed/
 clinic/credentials.json
 clinic/token.json
 clinic/*.soap.json
+clinic_automation/.env
+clinic_automation/.encryption_key
+clinic_automation/.rsa_key*.pem
+clinic_automation/credentials.json
+clinic_automation/service_account.json
+clinic_automation/.venv/
+clinic_automation/audio_files/
+clinic_automation/Yeni klasör/
+doctor_messages.txt
+*.m4a
+*.mp3
+*.wav
+*.done
 
 # Runtime artifact'ler — test cwd'sine bağlı olarak repo kökünde
 # de oluşabilir; generic pattern ile her yerde yoksay.

@@ -115,6 +115,23 @@ def check_webhook_secrets(r: CheckResult) -> None:
     else:
         r.warn("WEBHOOK_SECRET yok ve REQUIRE_SIGNATURE=false (DEV ortamı)")
 
+    calendar_enabled = os.getenv("CALENDAR_PUSH_ENABLED", "false").lower() in (
+        "1", "true", "yes", "on",
+    )
+    calendar_require = os.getenv("CALENDAR_REQUIRE_PUSH_TOKEN", "true").lower() in (
+        "1", "true", "yes", "on",
+    )
+    calendar_token = os.getenv("CALENDAR_PUSH_TOKEN", "")
+    if calendar_enabled and calendar_require and not calendar_token:
+        r.fail(
+            "CALENDAR_PUSH_TOKEN eksik (CALENDAR_REQUIRE_PUSH_TOKEN=true ile fail-closed) — "
+            "Calendar push webhook istekleri reddedilecek"
+        )
+    elif calendar_enabled and calendar_token:
+        r.ok("CALENDAR_PUSH_TOKEN set")
+    elif calendar_enabled:
+        r.warn("CALENDAR_PUSH_TOKEN yok ve CALENDAR_REQUIRE_PUSH_TOKEN=false (DEV ortamı)")
+
     payment_secret = os.getenv("PAYMENT_WEBHOOK_SECRET", "")
     if payment_secret:
         r.ok("PAYMENT_WEBHOOK_SECRET set")
@@ -138,6 +155,15 @@ def check_admin_panel(r: CheckResult) -> None:
         )
     else:
         r.ok("FLASK_SECRET_KEY set")
+    try:
+        max_failures = int(os.getenv("ADMIN_LOGIN_MAX_FAILURES", "5"))
+        lockout_seconds = int(os.getenv("ADMIN_LOGIN_LOCKOUT_SECONDS", "900"))
+        if max_failures < 3 or lockout_seconds < 60:
+            r.warn("Admin login lockout çok gevşek görünüyor")
+        else:
+            r.ok("Admin login lockout ayarlı")
+    except ValueError:
+        r.fail("ADMIN_LOGIN_MAX_FAILURES / ADMIN_LOGIN_LOCKOUT_SECONDS integer olmalı")
 
 
 def check_taxes(r: CheckResult) -> None:
