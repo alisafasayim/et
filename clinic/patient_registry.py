@@ -76,10 +76,25 @@ class PatientRegistry:
                     notion_page_id  TEXT,
                     consent_at      TEXT,
                     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-                    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+                    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+                    journey_status  TEXT NOT NULL DEFAULT 'basvuru'
                 )
                 """
             )
+            # Lazy migration: eski DB'lerde journey_status kolonu yoksa ekle.
+            # Faz H'den önce oluşturulmuş patient_registry.db'leri korur.
+            try:
+                self._conn.execute(
+                    "ALTER TABLE patients ADD COLUMN journey_status TEXT "
+                    "NOT NULL DEFAULT 'basvuru'"
+                )
+                logger.info(
+                    "patient_registry: journey_status kolonu migration ile eklendi"
+                )
+            except sqlite3.OperationalError:
+                # Kolon zaten var — yeni oluşturulan DB veya migration uygulandı
+                pass
+
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_patients_tax_id_hash "
                 "ON patients(tax_id_hash)"
@@ -205,6 +220,51 @@ class PatientRegistry:
                 "UPDATE patients SET notion_page_id=?, updated_at=? WHERE uuid=?",
                 (notion_page_id, now, patient_uuid),
             )
+
+    def set_journey_status(self, patient_uuid: str, status: str) -> None:
+        """
+        Hasta yolculuk durumunu günceller (Faz H).
+
+        Geçerli değerler patient_journey.JourneyStage.value listesinden:
+        basvuru, triyaj, on_degerlendirme, klinik_degerlendirme, tani,
+        tedavi, izlem, sonlandirma, pasif.
+
+        Audit log'a 'journey.advance' event'i yazılır.
+        """
+        valid_stages = {
+            "basvuru", "triyaj", "on_degerlendirme", "klinik_degerlendirme",
+            "tani", "tedavi", "izlem", "sonlandirma", "pasif",
+        }
+        if status not in valid_stages:
+            raise ValueError(
+                f"Geçersiz journey status: {status!r}. "
+                f"Beklenenlerden biri: {sorted(valid_stages)}"
+            )
+        now = datetime.now(tz=timezone.utc).isoformat()
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE patients SET journey_status=?, updated_at=? WHERE uuid=?",
+                (status, now, patient_uuid),
+            )
+        try:
+            from audit_log import audit
+            audit(
+                "journey.advance",
+                patient_uuid=patient_uuid,
+                details={"new_status": status, "at": now},
+            )
+        except Exception:
+            pass
+
+    def get_journey_status(self, patient_uuid: str) -> str:
+        """Hasta yolculuk durumunu döndürür (default: 'basvuru')."""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT journey_status FROM patients WHERE uuid=?",
+                (patient_uuid,),
+            )
+            row = cur.fetchone()
+        return row[0] if row and row[0] else "basvuru"
 
     def record_consent(self, patient_uuid: str, when: Optional[str] = None) -> None:
         """Açık rıza alınma zamanını işler (KVKK m.5/2)."""

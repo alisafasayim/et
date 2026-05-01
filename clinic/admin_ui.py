@@ -302,6 +302,19 @@ def patients():
     )
 
 
+JOURNEY_STAGES = [
+    ("basvuru", "📋 Başvuru"),
+    ("triyaj", "🚩 Triyaj"),
+    ("on_degerlendirme", "📝 Ön Değerlendirme"),
+    ("klinik_degerlendirme", "🩺 Klinik Değerlendirme"),
+    ("tani", "🧠 Tanı"),
+    ("tedavi", "💊 Tedavi"),
+    ("izlem", "🔄 İzlem"),
+    ("sonlandirma", "✅ Sonlandırma"),
+    ("pasif", "💤 Pasif"),
+]
+
+
 @bp.route("/patients/<patient_uuid>", methods=["GET"])
 @_require_login
 def patient_detail(patient_uuid: str):
@@ -318,12 +331,38 @@ def patient_detail(patient_uuid: str):
     except Exception:
         events = []
 
+    # Hasta yolculuk durumu (Faz H)
+    try:
+        journey_status = registry.get_journey_status(patient_uuid)
+    except Exception:
+        journey_status = "basvuru"
+
     return render_template(
         "admin/patient_detail.html",
         patient=patient,
         events=events,
+        journey_status=journey_status,
+        journey_stages=JOURNEY_STAGES,
         csrf_token=_csrf_token(),
     )
+
+
+@bp.route("/patients/<patient_uuid>/journey", methods=["POST"])
+@_require_login
+def patient_journey(patient_uuid: str):
+    """Hasta yolculuk durumunu güncelle (basvuru → ... → sonlandirma)."""
+    _validate_csrf()
+    from patient_registry import get_default_registry
+    registry = get_default_registry()
+    if registry.get_patient(patient_uuid) is None:
+        abort(404)
+    new_status = request.form.get("status", "")
+    try:
+        registry.set_journey_status(patient_uuid, new_status)
+        flash(f"Yolculuk durumu güncellendi: {new_status}", "success")
+    except ValueError as exc:
+        flash(f"Geçersiz durum: {exc}", "error")
+    return redirect(url_for("admin_ui.patient_detail", patient_uuid=patient_uuid))
 
 
 @bp.route("/patients/<patient_uuid>/consent", methods=["POST"])

@@ -4,6 +4,49 @@
 <a href="{{ url_for('admin_ui.patients') }}" class="muted">← Hasta listesi</a>
 <h1>{{ patient.full_name }} <span class="pseudo" style="font-size: 18px;">{{ patient.pseudonym }}</span></h1>
 
+{% if journey_stages %}
+<div class="card" style="margin-bottom: 16px;">
+  <h2 style="margin-top: 0;">🛤️ Hasta Yolculuğu</h2>
+  <p style="font-size: 13px; color: var(--muted); margin-bottom: 12px;">
+    Mevcut aşama:
+    <strong>
+      {% for stage_value, stage_label in journey_stages %}
+        {% if stage_value == journey_status %}{{ stage_label }}{% endif %}
+      {% endfor %}
+    </strong>
+  </p>
+  <div style="display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px;">
+    {% set stage_index = namespace(found=false, current=0) %}
+    {% for stage_value, stage_label in journey_stages %}
+      {% if stage_value == journey_status %}
+        {% set stage_index.found = true %}
+      {% endif %}
+      <span style="
+        padding: 6px 10px;
+        border-radius: 4px;
+        font-size: 12px;
+        background: {% if stage_value == journey_status %}var(--accent){% elif stage_index.found %}var(--bg){% else %}var(--success){% endif %};
+        color: {% if stage_value == journey_status or not stage_index.found %}#fff{% else %}var(--muted){% endif %};
+        opacity: {% if stage_value == journey_status %}1{% elif stage_index.found %}0.5{% else %}1{% endif %};
+      ">
+        {{ stage_label }}
+      </span>
+    {% endfor %}
+  </div>
+  <form method="post" action="{{ url_for('admin_ui.patient_journey', patient_uuid=patient.uuid) }}"
+        style="display: flex; gap: 8px; align-items: center;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="status">Durum güncelle:</label>
+    <select name="status" id="status">
+      {% for stage_value, stage_label in journey_stages %}
+        <option value="{{ stage_value }}" {% if stage_value == journey_status %}selected{% endif %}>{{ stage_label }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Kaydet</button>
+  </form>
+</div>
+{% endif %}
+
 <div class="grid cols-2">
   <div class="card">
     <h2>Kimlik Bilgileri (yerel, şifreli)</h2>
