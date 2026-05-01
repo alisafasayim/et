@@ -1,0 +1,49 @@
+{% extends "admin/base.html" %}
+{% block title %}Manuel e-SMM — Klinik Admin{% endblock %}
+{% block content %}
+<a href="{{ url_for('admin_ui.dashboard') }}" class="muted">← Dashboard</a>
+<h1>Manuel e-SMM Kes</h1>
+
+<div class="card" style="max-width: 560px;">
+  <p class="muted">
+    Tahsilat yapıldıktan sonra Paraşüt'te e-SMM kes ve veliye WhatsApp ile gönder.
+    POS entegrasyonu varsa <code>/webhook/payment</code> üzerinden otomatik tetiklenir.
+  </p>
+  <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="row">
+      <label for="patient_name">Hasta Adı *</label>
+      <input type="text" name="patient_name" id="patient_name" required>
+    </div>
+    <div class="row">
+      <label for="guardian_phone">Veli Telefon *</label>
+      <input type="text" name="guardian_phone" id="guardian_phone" required
+             placeholder="05321234567">
+    </div>
+    <div class="row">
+      <label for="tax_id">VKN / TCKN *</label>
+      <input type="text" name="tax_id" id="tax_id" required
+             pattern="[0-9]{10,11}" maxlength="11">
+    </div>
+    <div class="row">
+      <label for="amount">Tutar (TL) *</label>
+      <input type="text" name="amount" id="amount" required placeholder="1500.00">
+    </div>
+    <div class="row">
+      <label for="description">Açıklama</label>
+      <input type="text" name="description"
+             value="Çocuk ve Ergen Psikiyatrisi Muayenesi">
+    </div>
+    <div class="row">
+      <label for="appointment_date">Randevu Tarihi (opsiyonel)</label>
+      <input type="date" name="appointment_date" id="appointment_date">
+    </div>
+    <div class="row">
+      <label for="collection_key">Tahsilat Anahtarı (idempotency, opsiyonel)</label>
+      <input type="text" name="collection_key" id="collection_key"
+             placeholder="POS işlem ID'si veya benzersiz anahtar">
+    </div>
+    <button type="submit">e-SMM Süreci Başlat</button>
+  </form>
+</div>
+{% endblock %}

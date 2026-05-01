@@ -15,6 +15,11 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 import ollama
 from faster_whisper import WhisperModel
@@ -38,6 +43,11 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
 CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
 
+# Klinik yerel saat dilimi. Tüm randevu/kayıt karşılaştırmaları
+# bu zone'a hizalanır. Önceden naive datetime'lar UTC sayılıyordu
+# → Türkiye'deki bir randevu 3 saat kayıyordu.
+CLINIC_TZ = ZoneInfo(os.getenv("CLINIC_TZ", "Europe/Istanbul"))
+
 # Randevu eşleştirmesi için tolerans (dakika)
 APPOINTMENT_MATCH_WINDOW_MINUTES = 30
 
@@ -50,8 +60,12 @@ def get_audio_metadata(file_path: Path) -> dict:
     tag = TinyTag.get(str(file_path))
     stat = file_path.stat()
 
-    # TinyTag bazı formatlarda kayıt tarihini veremeyebilir; fallback: dosya mtime
-    recorded_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+    # mtime POSIX timestamp (UTC referanslı). Doğru çevrim için aware
+    # UTC datetime, sonra klinik yerel zone'una çevir — eşleştirmede
+    # randevular yerel TZ ile karşılaştırılır.
+    recorded_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).astimezone(
+        CLINIC_TZ
+    )
 
     return {
         "file_path": str(file_path),
@@ -82,17 +96,37 @@ def get_calendar_service():
     return build("calendar", "v3", credentials=creds)
 
 
+def _parse_calendar_dt(value: str) -> datetime:
+    """
+    Google Calendar event start/end değerini aware datetime'a çevirir.
+    All-day randevularda 'date' (YYYY-MM-DD) gelir, normalde dateTime
+    ISO with offset. Naive değerler klinik yerel TZ kabul edilir.
+    """
+    # All-day event: sadece YYYY-MM-DD
+    if "T" not in value:
+        d = datetime.fromisoformat(value)
+        return d.replace(hour=0, tzinfo=CLINIC_TZ)
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=CLINIC_TZ)
+    return dt
+
+
 def fetch_day_appointments(service, target_date: datetime) -> list[dict]:
-    """Verilen güne ait tüm takvim randevularını çeker."""
-    day_start = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = day_start + timedelta(days=1)
+    """Verilen güne (klinik yerel TZ'sinde) ait tüm randevuları çeker."""
+    # target_date naive ise yerel TZ kabul et
+    if target_date.tzinfo is None:
+        target_date = target_date.replace(tzinfo=CLINIC_TZ)
+    local = target_date.astimezone(CLINIC_TZ)
+    day_start_local = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end_local = day_start_local + timedelta(days=1)
 
     events_result = (
         service.events()
         .list(
             calendarId=GOOGLE_CALENDAR_ID,
-            timeMin=day_start.astimezone(timezone.utc).isoformat(),
-            timeMax=day_end.astimezone(timezone.utc).isoformat(),
+            timeMin=day_start_local.astimezone(timezone.utc).isoformat(),
+            timeMax=day_end_local.astimezone(timezone.utc).isoformat(),
             singleEvents=True,
             orderBy="startTime",
         )
@@ -110,7 +144,7 @@ def fetch_day_appointments(service, target_date: datetime) -> list[dict]:
                 "description": event.get("description", ""),
                 "start": start_str,
                 "end": end_str,
-                "start_dt": datetime.fromisoformat(start_str),
+                "start_dt": _parse_calendar_dt(start_str),
             }
         )
     return appointments
@@ -119,14 +153,18 @@ def fetch_day_appointments(service, target_date: datetime) -> list[dict]:
 def match_appointments(recorded_at: datetime, appointments: list[dict]) -> list[dict]:
     """
     Ses kaydının saatine yakın (±APPOINTMENT_MATCH_WINDOW_MINUTES) randevuları döner.
-    Ses kaydı birden fazla randevuyu kapsayabilir; tamamını listele.
+    Tüm karşılaştırmalar aware datetime üzerinden yapılır; recorded_at
+    naive gelirse klinik yerel TZ kabul edilir.
     """
+    if recorded_at.tzinfo is None:
+        recorded_at = recorded_at.replace(tzinfo=CLINIC_TZ)
+
     window = timedelta(minutes=APPOINTMENT_MATCH_WINDOW_MINUTES)
     matched = []
     for appt in appointments:
         appt_start = appt["start_dt"]
-        if not appt_start.tzinfo:
-            appt_start = appt_start.replace(tzinfo=timezone.utc)
+        if appt_start.tzinfo is None:
+            appt_start = appt_start.replace(tzinfo=CLINIC_TZ)
         if abs(recorded_at - appt_start) <= window:
             matched.append(appt)
     return matched
@@ -136,12 +174,44 @@ def match_appointments(recorded_at: datetime, appointments: list[dict]) -> list[
 # 3. Transkripsiyon (faster-whisper) ve Diarization (pyannote)
 # ---------------------------------------------------------------------------
 
+# Modeller proses ömrü boyunca tek sefer yüklenir; her ses dosyasında
+# yeniden initialize etmek (faster-whisper large-v3 ~3 GB, pyannote ~500 MB)
+# I/O ve VRAM patlamasına yol açıyordu.
+_whisper_model: WhisperModel | None = None
+_diarization_pipeline: "Pipeline | None" = None
+
+
+def _get_whisper_model() -> WhisperModel:
+    global _whisper_model
+    if _whisper_model is None:
+        print(f"[Whisper] Model yükleniyor: {WHISPER_MODEL_SIZE} (ilk seferinde yavaş olabilir)")
+        _whisper_model = WhisperModel(
+            WHISPER_MODEL_SIZE, device="auto", compute_type="auto"
+        )
+    return _whisper_model
+
+
+def _get_diarization_pipeline() -> Pipeline:
+    global _diarization_pipeline
+    if _diarization_pipeline is None:
+        if not HF_TOKEN:
+            raise EnvironmentError(
+                "HF_TOKEN ayarlanmamış; pyannote/speaker-diarization-3.1 indirilemez."
+            )
+        print("[PyAnnote] Diarization pipeline yükleniyor (ilk seferinde yavaş olabilir)")
+        _diarization_pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            use_auth_token=HF_TOKEN,
+        )
+    return _diarization_pipeline
+
+
 def transcribe_audio(file_path: Path) -> list[dict]:
     """
     faster-whisper ile transkripsiyon yapar.
     Her segment için başlangıç/bitiş süresi ve metni döner.
     """
-    model = WhisperModel(WHISPER_MODEL_SIZE, device="auto", compute_type="auto")
+    model = _get_whisper_model()
     segments, info = model.transcribe(str(file_path), beam_size=5, language="tr")
 
     print(f"[Whisper] Dil: {info.language}, Olasılık: {info.language_probability:.2f}")
@@ -161,10 +231,7 @@ def diarize_audio(file_path: Path) -> list[dict]:
     pyannote.audio ile konuşmacı ayrımı (diarization) yapar.
     Her konuşma bloğu için başlangıç, bitiş ve konuşmacı etiketi döner.
     """
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        use_auth_token=HF_TOKEN,
-    )
+    pipeline = _get_diarization_pipeline()
     diarization = pipeline(str(file_path))
 
     turns = []
@@ -335,17 +402,23 @@ def generate_soap_note(
     patient_name: str,
     appointment_id: str,
     appointment_summary: str,
+    appointment_start: str = "",
 ) -> dict:
     """
     Ollama üzerinden lokal LLM'e transkript segmenti göndererek
     SOAP formatında klinik not üretir.
+
+    appointment_start: Randevunun gerçek başlangıç ISO zamanı.
+    LLM'in echo'suna güvenmek yerine bu değer post-process olarak
+    SOAP JSON'una yazılır (Notion'da "Randevu Tarihi" sütunu için).
     """
+    generated_at = datetime.now(tz=timezone.utc).isoformat()
     prompt = SOAP_PROMPT.format(
         patient_name=patient_name,
         appointment_id=appointment_id,
         appointment_summary=appointment_summary,
         transcript=transcript_segment,
-        generated_at=datetime.now().isoformat(),
+        generated_at=generated_at,
     )
 
     response = ollama.chat(
@@ -359,7 +432,17 @@ def generate_soap_note(
     if not json_match:
         raise ValueError(f"LLM geçerli JSON döndürmedi:\n{raw}")
 
-    return json.loads(json_match.group())
+    soap = json.loads(json_match.group())
+
+    # Güvenilir metadata'yı LLM'in çıktısının üzerine yaz; LLM bazen
+    # alanları boş/yanlış echo ediyor.
+    soap["patient_name"] = patient_name
+    soap["appointment_id"] = appointment_id
+    soap["appointment_summary"] = appointment_summary
+    soap["appointment_start"] = appointment_start
+    soap["generated_at"] = generated_at
+
+    return soap
 
 
 # ---------------------------------------------------------------------------
@@ -405,22 +488,30 @@ def process_audio_file(file_path: Path, calendar_service) -> list[dict]:
     # 5. Her segment için SOAP notu
     soap_notes = []
     for seg in detected_segments:
-        # Transkriptten ilgili zaman aralığını ayıkla
-        seg_lines = [
-            line
-            for line, raw_seg in zip(
-                full_transcript.splitlines(), merged
-            )
-            if seg["transcript_start_second"]
-            <= raw_seg["start"]
-            <= seg["transcript_end_second"]
+        # İlgili transkript bloklarını doğrudan `merged` üzerinden seç.
+        # Eski yaklaşım `full_transcript.splitlines()` ile zip'liyordu —
+        # bir segmentin metni satır içeriyorsa zip kayıyor ve yanlış
+        # hastaya satır atanıyordu.
+        try:
+            start_s = float(seg["transcript_start_second"])
+            end_s = float(seg["transcript_end_second"])
+        except (KeyError, TypeError, ValueError):
+            start_s, end_s = 0.0, float("inf")
+
+        seg_blocks = [
+            raw_seg for raw_seg in merged
+            if start_s <= raw_seg["start"] <= end_s
+            or start_s <= raw_seg["end"] <= end_s
+            or (raw_seg["start"] <= start_s and raw_seg["end"] >= end_s)
         ]
-        seg_transcript = "\n".join(seg_lines) if seg_lines else full_transcript
+        seg_transcript = (
+            format_transcript_for_llm(seg_blocks) if seg_blocks else full_transcript
+        )
 
         # İlgili randevuyu bul
         appointment = next(
             (a for a in matched if a["event_id"] == seg.get("appointment_id")),
-            {"event_id": seg.get("appointment_id", "unknown"), "summary": ""},
+            {"event_id": seg.get("appointment_id", "unknown"), "summary": "", "start": ""},
         )
 
         print(f"  SOAP üretiliyor: {seg.get('patient_name', 'unknown')}")
@@ -429,6 +520,7 @@ def process_audio_file(file_path: Path, calendar_service) -> list[dict]:
             patient_name=seg.get("patient_name", "unknown"),
             appointment_id=appointment["event_id"],
             appointment_summary=appointment.get("summary", ""),
+            appointment_start=appointment.get("start", ""),
         )
         soap_notes.append(soap)
 
@@ -476,4 +568,6 @@ def run_inbox_processor():
 
 
 if __name__ == "__main__":
+    from logging_setup import configure_logging
+    configure_logging()
     run_inbox_processor()

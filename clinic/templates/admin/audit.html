@@ -1,0 +1,61 @@
+{% extends "admin/base.html" %}
+{% block title %}Denetim — Klinik Admin{% endblock %}
+{% block content %}
+<h1>Denetim Kayıtları</h1>
+<p class="muted">KVKK m.12 — append-only erişim izi.</p>
+
+<form method="get" class="filters">
+  <div>
+    <label for="action">Eylem</label>
+    <input type="text" name="action" id="action" value="{{ filter_action }}"
+           placeholder="patient.create, admin_ui.access...">
+  </div>
+  <div>
+    <label for="actor">Aktör</label>
+    <input type="text" name="actor" id="actor" value="{{ filter_actor }}"
+           placeholder="system, admin, admin_ui">
+  </div>
+  <div>
+    <label for="limit">Limit</label>
+    <input type="text" name="limit" id="limit" value="200" style="width: 80px;">
+  </div>
+  <button type="submit">Filtrele</button>
+  <a href="{{ url_for('admin_ui.audit_view') }}" class="btn secondary">Sıfırla</a>
+</form>
+
+<div class="card">
+  {% if events %}
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Zaman (UTC)</th>
+        <th>Aktör</th>
+        <th>Eylem</th>
+        <th>Hasta</th>
+        <th>Detaylar</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in events %}
+      <tr>
+        <td><code>{{ e.id }}</code></td>
+        <td><code>{{ e.ts[:19] }}</code></td>
+        <td>{{ e.actor }}</td>
+        <td><strong>{{ e.action }}</strong></td>
+        <td>
+          {% if e.patient_uuid %}
+            <a href="{{ url_for('admin_ui.patient_detail', patient_uuid=e.patient_uuid) }}"
+               class="pseudo">{{ e.patient_uuid[:8] }}…</a>
+          {% else %}—{% endif %}
+        </td>
+        <td>{% if e.details %}<code>{{ e.details }}</code>{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Filtreye uyan kayıt yok</div>
+  {% endif %}
+</div>
+{% endblock %}

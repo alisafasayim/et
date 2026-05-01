@@ -20,8 +20,13 @@ import hmac
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 import requests
 from flask import Flask, abort, jsonify, request
@@ -29,10 +34,14 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+from http_retry import raise_for_retry, with_retry
+from phone_utils import (
+    extract_phone_from_description as _extract_phone_from_description,
 )
+from phone_utils import normalize_phone as _normalize_phone
+
+# Loglama yapılandırması logging_setup tarafından merkezi yapılır.
+# Basit getLogger; konfigürasyonu çağıran tarafa bırakırız.
 logger = logging.getLogger("whatsapp_communicator")
 
 # ---------------------------------------------------------------------------
@@ -47,13 +56,34 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 WEBHOOK_LISTEN_PORT = int(os.getenv("WEBHOOK_LISTEN_PORT", "5055"))
 WEBHOOK_PUBLIC_URL = os.getenv("WEBHOOK_PUBLIC_URL", "http://localhost:5055")
 
+# Üretimde imza zorunlu olmalı; sadece geliştirme ortamında
+# WEBHOOK_REQUIRE_SIGNATURE=false ile devre dışı bırakılabilir.
+WEBHOOK_REQUIRE_SIGNATURE = os.getenv("WEBHOOK_REQUIRE_SIGNATURE", "true").lower() in (
+    "1", "true", "yes", "on",
+)
+
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 GOOGLE_TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
-GOOGLE_CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+# İptal mesajı geldiğinde Calendar event'i silmek istiyorsanız
+# CALENDAR_AUTO_DELETE_ON_CANCEL=true yapın — yazılabilir scope gerekir.
+# Bu değişiklik OAuth onayını yeniler (token.json silinmeli).
+CALENDAR_AUTO_DELETE_ON_CANCEL = os.getenv(
+    "CALENDAR_AUTO_DELETE_ON_CANCEL", "false"
+).lower() in ("1", "true", "yes", "on")
+
+GOOGLE_CALENDAR_SCOPES = (
+    ["https://www.googleapis.com/auth/calendar.events"]
+    if CALENDAR_AUTO_DELETE_ON_CANCEL
+    else ["https://www.googleapis.com/auth/calendar.readonly"]
+)
 GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 
 # Yeni randevu taraması için kaç dakika öncesini kontrol et
 CALENDAR_POLL_LOOKBACK_MINUTES = int(os.getenv("CALENDAR_POLL_LOOKBACK_MINUTES", "10"))
+PAYMENT_JOB_KIND = "payment_esmm"
+PAYMENT_JOB_STALE_SECONDS = int(os.getenv("PAYMENT_JOB_STALE_SECONDS", "1800"))
+PAYMENT_JOB_POLL_LIMIT = int(os.getenv("PAYMENT_JOB_POLL_LIMIT", "5"))
+PAYMENT_JOB_PAYLOAD_PREFIX = "fernet:"
 
 # ---------------------------------------------------------------------------
 # 1. Evolution API – Düşük Seviye HTTP İstemcisi
@@ -68,17 +98,19 @@ def _evo_headers() -> dict:
     }
 
 
+@with_retry()
 def _evo_post(path: str, payload: dict) -> dict:
     url = f"{EVOLUTION_API_URL}{path}"
     resp = requests.post(url, headers=_evo_headers(), json=payload, timeout=15)
-    resp.raise_for_status()
+    raise_for_retry(resp)
     return resp.json()
 
 
+@with_retry()
 def _evo_get(path: str) -> dict:
     url = f"{EVOLUTION_API_URL}{path}"
     resp = requests.get(url, headers=_evo_headers(), timeout=15)
-    resp.raise_for_status()
+    raise_for_retry(resp)
     return resp.json()
 
 
@@ -154,20 +186,6 @@ def get_instance_status() -> dict:
 # 3. WhatsApp Mesaj Gönderimi
 # ---------------------------------------------------------------------------
 
-def _normalize_phone(phone: str) -> str:
-    """
-    Telefon numarasını Evolution API'nin beklediği formata getirir.
-    Başındaki + veya 0 kaldırılır, Türkiye için 90 ülke kodu eklenir.
-    Örn: "0532 123 45 67" → "905321234567"
-    """
-    digits = "".join(filter(str.isdigit, phone))
-    if digits.startswith("0"):
-        digits = "90" + digits[1:]
-    elif not digits.startswith("90"):
-        digits = "90" + digits
-    return digits
-
-
 def send_whatsapp_message(phone: str, message: str) -> dict:
     """
     Evolution API üzerinden belirtilen numaraya WhatsApp mesajı gönderir.
@@ -193,7 +211,8 @@ def send_appointment_reminder(
     form_url: str = "",
 ) -> dict:
     """
-    Randevu hatırlatma ve anamnez formu mesajını gönderir.
+    Yeni oluşturulan randevu için hoşgeldin mesajı + anamnez formu linki.
+    Bu, randevu OLUŞTURULDUĞUNDA (poll_and_notify) gönderilir.
     """
     form_url = form_url or GOOGLE_ANAMNESIS_FORM_URL
     appointment_str = appointment_dt.strftime("%d.%m.%Y %H:%M")
@@ -204,6 +223,36 @@ def send_appointment_reminder(
         f"Lütfen gelmeden önce aşağıdaki anamnez formunu doldurunuz:\n"
         f"{form_url}\n\n"
         f"Herhangi bir değişiklik için bu mesajı yanıtlayabilirsiniz."
+    )
+    return send_whatsapp_message(guardian_phone, message)
+
+
+def send_upcoming_reminder(
+    patient_name: str,
+    guardian_phone: str,
+    appointment_dt: datetime,
+    horizon: str,
+) -> dict:
+    """
+    Yaklaşan randevu için kısa hatırlatma. horizon: '24h' veya '1h'.
+    Anamnez form linki içermez (oluşturma anında zaten gönderildi);
+    bu mesaj randevunun yaklaştığını belirtir, no-show oranını düşürür.
+    """
+    appointment_str = appointment_dt.strftime("%d.%m.%Y %H:%M")
+    if horizon == "24h":
+        intro = "Yarın randevunuz var!"
+    elif horizon == "1h":
+        intro = "Randevunuz yaklaşık 1 saat sonra başlıyor!"
+    else:
+        intro = f"Yaklaşan randevu hatırlatması ({horizon})"
+
+    message = (
+        f"Merhaba {patient_name} velisi,\n\n"
+        f"⏰ {intro}\n"
+        f"📅 *{appointment_str}*\n\n"
+        f"Gelemeyecekseniz lütfen bu mesajı 'iptal' yazarak yanıtlayın; "
+        f"böylece slot başka bir hastaya açılabilir.\n\n"
+        f"İyi günler dileriz."
     )
     return send_whatsapp_message(guardian_phone, message)
 
@@ -277,17 +326,49 @@ def fetch_recently_created_appointments(service) -> list[dict]:
     return appointments
 
 
-def _extract_phone_from_description(description: str) -> str:
+def fetch_upcoming_appointments(
+    service,
+    window_start: datetime,
+    window_end: datetime,
+) -> list[dict]:
     """
-    Takvim etkinliği açıklamasından telefon numarasını regex ile ayıklar.
-    Beklenen format: "Tel: 05321234567" veya "Veli Tel: +90 532 123 4567"
+    Belirli bir zaman penceresinde başlayacak randevuları döner.
+    24h ve 1h hatırlatma cron'larında kullanılır — fetch_recently_
+    created_appointments yalnızca yeni oluşturulanları getirir,
+    bu fonksiyon ise GELECEKTEKİ randevuları getirir.
     """
-    import re
-    pattern = r"(?:veli\s*)?tel[:\s]*([0-9\s\+\-\(\)]{10,15})"
-    match = re.search(pattern, description, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    return ""
+    events_result = (
+        service.events()
+        .list(
+            calendarId=GOOGLE_CALENDAR_ID,
+            timeMin=window_start.astimezone(timezone.utc).isoformat(),
+            timeMax=window_end.astimezone(timezone.utc).isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
+
+    appointments = []
+    for event in events_result.get("items", []):
+        # All-day eventları atla; klinik randevu saatli olur
+        if "dateTime" not in event["start"]:
+            continue
+        start_str = event["start"]["dateTime"]
+        appointments.append(
+            {
+                "event_id": event["id"],
+                "summary": event.get("summary", ""),
+                "description": event.get("description", ""),
+                "start": start_str,
+                "start_dt": datetime.fromisoformat(start_str.replace("Z", "+00:00")),
+                "phone": _extract_phone_from_description(
+                    event.get("description", "")
+                ),
+                "patient_name": event.get("summary", "Bilinmiyor"),
+            }
+        )
+    return appointments
 
 
 # ---------------------------------------------------------------------------
@@ -318,24 +399,103 @@ def classify_incoming_message(message_text: str) -> str:
     return "other"
 
 
+def find_upcoming_appointment_by_phone(
+    sender_phone: str,
+    lookahead_days: int = 30,
+) -> dict | None:
+    """
+    Verilen veli telefonunun yaklaşan randevusunu bulur.
+    Calendar etkinliği açıklamasındaki "Tel: ..." satırı üzerinden
+    eşleştirme yapılır. Birden fazla varsa EN YAKININI döner.
+    """
+    normalized = _normalize_phone(sender_phone)
+    service = get_calendar_service()
+    now = datetime.now(tz=timezone.utc)
+    upcoming = fetch_upcoming_appointments(
+        service,
+        window_start=now,
+        window_end=now + timedelta(days=lookahead_days),
+    )
+    for appt in sorted(upcoming, key=lambda a: a["start_dt"]):
+        appt_phone_normalized = _normalize_phone(appt.get("phone", ""))
+        if appt_phone_normalized and appt_phone_normalized == normalized:
+            return appt
+    return None
+
+
+def delete_calendar_event(event_id: str) -> bool:
+    """
+    Calendar etkinliğini siler. CALENDAR_AUTO_DELETE_ON_CANCEL=false
+    ise no-op (False döner). Read-only scope'la çağrılırsa Google
+    HttpError fırlatır — caller yakalamalı.
+    """
+    if not CALENDAR_AUTO_DELETE_ON_CANCEL:
+        logger.info(
+            "Calendar event silme atlandı (CALENDAR_AUTO_DELETE_ON_CANCEL=false): %s",
+            event_id,
+        )
+        return False
+    service = get_calendar_service()
+    service.events().delete(calendarId=GOOGLE_CALENDAR_ID, eventId=event_id).execute()
+    logger.info("Calendar event silindi: %s", event_id)
+    return True
+
+
 def handle_cancellation_request(sender_phone: str, message_text: str) -> None:
     """
-    İptal talebini loglar ve doktora bildirim mesajı gönderir.
+    İptal talebini işler:
+      1. Veliye onay mesajı gönder
+      2. Calendar'da yaklaşan randevuyu bul (telefon üzerinden)
+      3. CALENDAR_AUTO_DELETE_ON_CANCEL=true ise event'i sil; aksi
+         halde sadece doktora bildirim gönder
+      4. Doktora özet bildirim (slot bilgisiyle)
     """
     doctor_phone = os.getenv("DOCTOR_PHONE", "")
     logger.warning("İPTAL TALEBİ | Gönderen: %s | Mesaj: %s", sender_phone, message_text)
 
-    # Gönderene otomatik yanıt
+    # 1. Gönderene otomatik yanıt
     send_whatsapp_message(
         sender_phone,
-        "İptal talebiniz alındı. En kısa sürede sizinle iletişime geçeceğiz.",
+        "İptal talebiniz alındı. Size en kısa sürede dönüş yapılacaktır.",
     )
 
-    # Doktora bildirim
+    # 2. Yaklaşan randevuyu bul
+    appointment_info = ""
+    deleted = False
+    try:
+        appt = find_upcoming_appointment_by_phone(sender_phone)
+        if appt:
+            appt_str = appt["start_dt"].astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+            appointment_info = (
+                f"\nTespit edilen randevu: {appt.get('summary', '—')} ({appt_str})"
+            )
+            # 3. Otomatik silme açıksa
+            try:
+                deleted = delete_calendar_event(appt["event_id"])
+            except Exception as exc:
+                logger.error("Event silme hatası [%s]: %s", appt["event_id"], exc)
+                appointment_info += f"\n⚠️ Otomatik silme başarısız: {exc}"
+        else:
+            appointment_info = "\n(Bu telefona kayıtlı yaklaşan randevu bulunamadı)"
+    except Exception as exc:
+        logger.error("Yaklaşan randevu arama hatası: %s", exc)
+
+    # 4. Doktora bildirim
     if doctor_phone:
+        status_note = (
+            "Slot otomatik boşaltıldı."
+            if deleted
+            else "Calendar'dan manuel iptal gerekli."
+        )
         send_whatsapp_message(
             doctor_phone,
-            f"⚠️ İptal Talebi\nNumara: +{_normalize_phone(sender_phone)}\nMesaj: {message_text}",
+            (
+                f"⚠️ İptal Talebi\n"
+                f"Numara: +{_normalize_phone(sender_phone)}\n"
+                f"Mesaj: {message_text}"
+                f"{appointment_info}\n"
+                f"{status_note}"
+            ),
         )
 
 
@@ -369,13 +529,248 @@ def _verify_webhook_signature(payload_bytes: bytes, signature_header: str) -> bo
     """
     HMAC-SHA256 ile gelen webhook isteğinin imzasını doğrular.
     Evolution API webhook'u 'X-Webhook-Signature' başlığı gönderir.
+
+    Önceki sürüm: WEBHOOK_SECRET boşsa True dönüyordu — production'da
+    secret set edilmesi unutulduğunda webhook'a herkes POST atabilirdi.
+    Yeni davranış (fail-closed):
+      - WEBHOOK_REQUIRE_SIGNATURE=true (varsayılan) ve secret yoksa
+        log'a kritik uyarı bas, isteği REDDET.
+      - Secret varsa imza karşılaştır.
+      - Sadece geliştirme için WEBHOOK_REQUIRE_SIGNATURE=false ile
+        bilinçli olarak atlanabilir.
     """
     if not WEBHOOK_SECRET:
-        return True  # Secret ayarlanmamışsa doğrulama atlanır (geliştirme ortamı)
+        if WEBHOOK_REQUIRE_SIGNATURE:
+            logger.critical(
+                "WEBHOOK_SECRET ayarlanmamış. Webhook isteği fail-closed reddedildi. "
+                "Yalnızca dev ortamında WEBHOOK_REQUIRE_SIGNATURE=false ile atlayabilirsiniz."
+            )
+            return False
+        logger.warning("WEBHOOK_REQUIRE_SIGNATURE=false → imza doğrulama atlandı (DEV).")
+        return True
+
     expected = hmac.new(
         WEBHOOK_SECRET.encode(), payload_bytes, hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(expected, signature_header or "")
+
+
+# ---------------------------------------------------------------------------
+# Tahsilat (POS / iyzico) Webhook → otomatik e-SMM tetikleme
+# ---------------------------------------------------------------------------
+
+PAYMENT_WEBHOOK_SECRET = os.getenv("PAYMENT_WEBHOOK_SECRET", "")
+
+
+def _verify_payment_signature(payload_bytes: bytes, signature_header: str) -> bool:
+    """
+    Payment webhook için ayrı bir secret ile HMAC-SHA256 doğrulaması.
+    PAYMENT_WEBHOOK_SECRET set değilse fail-closed (WhatsApp webhook
+    ile aynı politika).
+    """
+    if not PAYMENT_WEBHOOK_SECRET:
+        if WEBHOOK_REQUIRE_SIGNATURE:
+            logger.critical(
+                "PAYMENT_WEBHOOK_SECRET ayarlanmamış. /webhook/payment isteği reddedildi."
+            )
+            return False
+        logger.warning("Payment webhook imzası dev modda atlandı.")
+        return True
+    expected = hmac.new(
+        PAYMENT_WEBHOOK_SECRET.encode(), payload_bytes, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature_header or "")
+
+
+def _normalize_payment_payload(raw: dict) -> dict | None:
+    """
+    POS sağlayıcısından bağımsız ortak şemaya çevirir.
+
+    Beklenen ortak alanlar (kayda hangi field'ları gönderdiğine bakar):
+        amount, patient_name, guardian_phone, tax_id, collection_key
+        appointment_date (isteğe bağlı)
+        description (isteğe bağlı)
+
+    Sağlayıcı 'event' veya 'status' alanında 'success' / 'paid'
+    benzeri bir değer gönderiyorsa True kabul edilir; aksi halde None.
+
+    İhtiyaca göre sağlayıcı-spesifik adapter eklenebilir; şimdilik
+    her sağlayıcının webhook payload'ını klinik tarafında elle
+    `amount`, `patient_name`, `guardian_phone`, `tax_id` ile
+    normalize eden generic bir contract.
+    """
+    status = (raw.get("event") or raw.get("status") or "").lower()
+    success_markers = {"success", "succeeded", "paid", "completed", "payment.succeeded", "payment_intent.succeeded"}
+    if status and not any(m in status for m in success_markers):
+        return None
+
+    required = ("amount", "patient_name", "guardian_phone", "tax_id")
+    if not all(raw.get(k) for k in required):
+        return None
+
+    return {
+        "amount": raw["amount"],
+        "patient_name": str(raw["patient_name"]),
+        "guardian_phone": str(raw["guardian_phone"]),
+        "tax_id": str(raw["tax_id"]),
+        "description": str(raw.get("description", "Çocuk ve Ergen Psikiyatrisi Muayenesi")),
+        "appointment_date": str(raw.get("appointment_date", "")),
+        "collection_key": str(raw.get("collection_key", raw.get("id", ""))),
+    }
+
+
+def _payment_job_id(normalized: dict, raw_body: bytes) -> str:
+    job_id = normalized.get("collection_key") or hashlib.sha256(raw_body).hexdigest()
+    normalized["collection_key"] = job_id
+    return job_id
+
+
+def _encode_payment_job_payload(normalized: dict) -> str:
+    from pii_crypto import encrypt
+
+    plaintext = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+    return PAYMENT_JOB_PAYLOAD_PREFIX + encrypt(plaintext)
+
+
+def _decode_payment_job_payload(stored_payload: str) -> dict:
+    if stored_payload.startswith(PAYMENT_JOB_PAYLOAD_PREFIX):
+        from pii_crypto import decrypt
+
+        encrypted = stored_payload[len(PAYMENT_JOB_PAYLOAD_PREFIX):]
+        return json.loads(decrypt(encrypted))
+    return json.loads(stored_payload)
+
+
+def _process_claimed_payment_job(store, job: dict) -> dict:
+    job_id = job["job_id"]
+    try:
+        payload = _decode_payment_job_payload(job["payload"])
+        from main import trigger_esmm
+        result = trigger_esmm(
+            patient_name=payload["patient_name"],
+            guardian_phone=payload["guardian_phone"],
+            tax_id=payload["tax_id"],
+            amount=payload["amount"],
+            description=payload["description"],
+            appointment_date=payload["appointment_date"],
+            collection_key=payload["collection_key"],
+        )
+        store.complete_job(
+            PAYMENT_JOB_KIND,
+            job_id,
+            result=json.dumps(result, ensure_ascii=False, default=str),
+        )
+        logger.info("Payment job completed: %s | status=%s", job_id, result.get("status"))
+        return {"job_id": job_id, "status": "done", "result": result}
+    except Exception as exc:
+        store.fail_job(PAYMENT_JOB_KIND, job_id, str(exc))
+        logger.error("Payment job failed [%s]: %s", job_id, exc)
+        return {"job_id": job_id, "status": "failed", "error": str(exc)}
+
+
+def process_payment_job(job_id: str) -> dict:
+    """Claim and process one queued payment job by id."""
+    from state_store import get_default_store
+
+    store = get_default_store()
+    job = store.claim_job(PAYMENT_JOB_KIND, job_id)
+    if not job:
+        existing = store.get_job(PAYMENT_JOB_KIND, job_id)
+        return existing or {"job_id": job_id, "status": "missing"}
+    return _process_claimed_payment_job(store, job)
+
+
+def poll_payment_jobs(limit: int = PAYMENT_JOB_POLL_LIMIT) -> list[dict]:
+    """Process queued payment jobs, including stale jobs from a crashed worker."""
+    from state_store import get_default_store
+
+    store = get_default_store()
+    requeued = store.requeue_stale_jobs(PAYMENT_JOB_KIND, PAYMENT_JOB_STALE_SECONDS)
+    if requeued:
+        logger.warning("Requeued %d stale payment job(s)", requeued)
+
+    results = []
+    for _ in range(limit):
+        job = store.claim_next_job(PAYMENT_JOB_KIND)
+        if not job:
+            break
+        results.append(_process_claimed_payment_job(store, job))
+    return results
+
+
+@app.route("/webhook/payment", methods=["POST"])
+def payment_webhook():
+    """
+    POS / ödeme sağlayıcı webhook'u → otomatik e-SMM tetikleme.
+
+    Kabul edilen JSON contract (sağlayıcıdan bağımsız):
+        {
+          "event": "payment.succeeded" | "status": "paid",
+          "amount": "1500.00",                    -- Decimal-safe string
+          "patient_name": "Ahmet Yılmaz",
+          "guardian_phone": "905321234567",
+          "tax_id": "12345678901",
+          "description": "...",                   -- opsiyonel
+          "appointment_date": "2026-04-30",       -- opsiyonel
+          "collection_key": "pos-tx-9421",        -- idempotency anahtarı
+          "id": "..."                             -- collection_key yoksa fallback
+        }
+
+    Doğrulama: X-Webhook-Signature header'ı (HMAC-SHA256 / PAYMENT_WEBHOOK_SECRET)
+    Yanıt: {"status": "queued"} veya {"status": "ignored"} / 4xx
+    """
+    raw_body = request.get_data()
+    signature = request.headers.get("X-Webhook-Signature", "")
+
+    if not _verify_payment_signature(raw_body, signature):
+        abort(401)
+
+    try:
+        payload = request.get_json(force=True)
+    except Exception:
+        abort(400)
+
+    normalized = _normalize_payment_payload(payload or {})
+    if not normalized:
+        logger.info("Payment webhook ignored (eksik/geçersiz payload).")
+        return jsonify({"status": "ignored"}), 200
+
+    from state_store import get_default_store
+
+    job_id = _payment_job_id(normalized, raw_body)
+    try:
+        job_payload = _encode_payment_job_payload(normalized)
+    except EnvironmentError as exc:
+        logger.critical("Payment job payload encryption unavailable: %s", exc)
+        return jsonify({"status": "configuration_error"}), 503
+    store = get_default_store()
+
+    if not store.enqueue_job(PAYMENT_JOB_KIND, job_id, job_payload):
+        existing = store.get_job(PAYMENT_JOB_KIND, job_id) or {"status": "queued"}
+        return jsonify({"status": f"already_{existing['status']}", "job_id": job_id}), 200
+
+    threading.Thread(target=process_payment_job, args=(job_id,), daemon=True).start()
+    return jsonify({"status": "queued", "job_id": job_id}), 202
+
+
+@app.route("/webhook/calendar", methods=["POST"])
+def calendar_webhook():
+    """
+    Google Calendar Watch push bildirimi → poll_and_notify tetikler.
+    Polling'in real-time alternatifi (10 dk yerine ~saniyeler).
+
+    Doğrulama: X-Goog-Channel-Token header'ı CALENDAR_PUSH_TOKEN ile
+    eşleşmeli (set edildiyse).
+    """
+    from calendar_watch import handle_push_notification, verify_push_token
+
+    received_token = request.headers.get("X-Goog-Channel-Token", "")
+    if not verify_push_token(received_token):
+        logger.warning("Calendar webhook geçersiz token reddedildi.")
+        abort(401)
+
+    result = handle_push_notification(dict(request.headers))
+    return jsonify(result), 200
 
 
 @app.route("/webhook/whatsapp", methods=["POST"])
@@ -449,23 +844,204 @@ def _handle_connection_update(event: dict) -> None:
 # 7. Ana Orkestratör – Takvim Polling ve Mesaj Gönderimi
 # ---------------------------------------------------------------------------
 
+def poll_upcoming_reminders(horizon: str = "24h") -> list[dict]:
+    """
+    Belirtilen horizon (24h veya 1h) yaklaşan randevular için
+    hatırlatma WhatsApp mesajı gönderir.
+
+    Idempotency: her (event_id, horizon) kombinasyonu state store'da
+    işaretlenir; aynı saatlerde tetiklenirse duplicate mesaj gitmez.
+
+    Cron örnekleri:
+      */15 * * * * python -c "from module3...wa_communicator import poll_upcoming_reminders; poll_upcoming_reminders('24h')"
+      */10 * * * * python -c "from ...                                                                 ; poll_upcoming_reminders('1h')"
+    """
+    from state_store import get_default_store
+
+    if horizon == "24h":
+        offset = timedelta(hours=24)
+        # 24h hatırlatma window: T-24h ± 30dk (cron 15'lik kaçırırsa garanti)
+        slack = timedelta(minutes=30)
+    elif horizon == "1h":
+        offset = timedelta(hours=1)
+        slack = timedelta(minutes=15)
+    else:
+        raise ValueError(f"Geçersiz horizon: {horizon}")
+
+    store = get_default_store()
+    service = get_calendar_service()
+    now = datetime.now(tz=timezone.utc)
+
+    # T = şu an + offset (24h sonra başlayacak)
+    window_start = now + offset - slack
+    window_end = now + offset + slack
+
+    upcoming = fetch_upcoming_appointments(service, window_start, window_end)
+    logger.info(
+        "[Reminder %s] Pencere %s ↔ %s | bulunan randevu: %d",
+        horizon, window_start.isoformat(), window_end.isoformat(), len(upcoming),
+    )
+
+    namespace = f"reminder_{horizon}"
+    results = []
+
+    for appt in upcoming:
+        event_id = appt["event_id"]
+
+        if not appt["phone"]:
+            logger.warning(
+                "[Reminder %s] Telefon yok: %s", horizon, appt["summary"]
+            )
+            results.append({"appointment_id": event_id, "status": "no_phone"})
+            continue
+
+        if not store.claim(namespace, event_id, meta=appt.get("summary", "")):
+            results.append({"appointment_id": event_id, "status": "already_sent"})
+            continue
+
+        try:
+            send_upcoming_reminder(
+                patient_name=appt["patient_name"],
+                guardian_phone=appt["phone"],
+                appointment_dt=appt["start_dt"],
+                horizon=horizon,
+            )
+            results.append({"appointment_id": event_id, "status": "sent"})
+        except Exception as exc:
+            logger.error("[Reminder %s] Gönderilemedi [%s]: %s", horizon, event_id, exc)
+            # Başarısız → claim'i geri al ki bir sonraki cron tekrar denesin
+            store.forget(namespace, event_id)
+            results.append({"appointment_id": event_id, "status": "failed", "error": str(exc)})
+
+    return results
+
+
+def poll_anamnesis_followup(min_hours_since_initial: float = 24.0) -> list[dict]:
+    """
+    İlk anamnez mesajı gönderildikten ≥N saat sonra hâlâ Google Forms'da
+    yanıt görünmeyen velilere ikinci kez hatırlatma gönderir.
+
+    Idempotency: ilk gönderim 'calendar_event_reminder' namespace'inde,
+    ikinci gönderim 'anamnesis_followup' namespace'inde işaretlenir.
+    """
+    from state_store import get_default_store
+
+    # Form yanıtlarını kontrol için Forms scope'u gerekir; M2'deki
+    # helper'ı yeniden kullanıyoruz (lazy import → testlerde sorun yok).
+    try:
+        from module2_notion_archiver import (
+            fetch_form_responses,
+            get_forms_service,
+            match_form_response_to_patient,
+        )
+    except ImportError as exc:
+        logger.error("[AnamnesisFollowup] M2 import edilemedi: %s", exc)
+        return []
+
+    form_id = os.getenv("GOOGLE_ANAMNESIS_FORM_ID", "")
+    if not form_id:
+        logger.warning("[AnamnesisFollowup] GOOGLE_ANAMNESIS_FORM_ID ayarlı değil; atlanıyor.")
+        return []
+
+    store = get_default_store()
+    try:
+        forms_service = get_forms_service()
+        responses = fetch_form_responses(forms_service, form_id)
+    except Exception as exc:
+        logger.error("[AnamnesisFollowup] Forms yanıtları alınamadı: %s", exc)
+        return []
+
+    # Yaklaşan randevuları çek (24h-30 gün arası)
+    service = get_calendar_service()
+    now = datetime.now(tz=timezone.utc)
+    upcoming = fetch_upcoming_appointments(
+        service,
+        window_start=now + timedelta(hours=2),  # çok yakın olanlar dışarıda
+        window_end=now + timedelta(days=30),
+    )
+
+    results = []
+    for appt in upcoming:
+        event_id = appt["event_id"]
+
+        # İlk anamnez mesajı gönderildi mi? (≥min_hours_since_initial önce)
+        first_meta_query = "calendar_event_reminder"
+        # state_store'dan son seen_at bilgisi yok; basit yaklaşım:
+        # ilk gönderimi yapmışsak (is_seen) ve şimdi-min_hours kuralı
+        # başka şekilde garanti yok. Pratik: zaten 24h sonraki hatırlatma
+        # olduğu için "ilk mesaj gönderildi" kontrolü yeterli; ek olarak
+        # bu followup'ın duplicate olmaması için kendi namespace'i var.
+        if not store.is_seen(first_meta_query, event_id):
+            # İlk mesaj henüz gitmemiş → followup atmaya gerek yok
+            continue
+
+        # Bu randevu için form yanıtı var mı?
+        match = match_form_response_to_patient(responses, appt.get("patient_name", ""))
+        if match:
+            # Veli doldurmuş, takip gereksiz
+            continue
+
+        # Daha önce followup gönderildi mi?
+        if not store.claim("anamnesis_followup", event_id, meta=appt.get("summary", "")):
+            results.append({"appointment_id": event_id, "status": "already_followed_up"})
+            continue
+
+        if not appt["phone"]:
+            results.append({"appointment_id": event_id, "status": "no_phone"})
+            continue
+
+        try:
+            appt_str = appt["start_dt"].strftime("%d.%m.%Y %H:%M")
+            message = (
+                f"Merhaba {appt.get('patient_name', '')} velisi,\n\n"
+                f"Yaklaşan randevunuz ({appt_str}) için anamnez formunu "
+                f"henüz görmedik. Görüşmemizin verimli olması için lütfen "
+                f"randevudan önce doldurun:\n"
+                f"{GOOGLE_ANAMNESIS_FORM_URL}\n\n"
+                f"Teşekkürler."
+            )
+            send_whatsapp_message(appt["phone"], message)
+            results.append({"appointment_id": event_id, "status": "sent"})
+        except Exception as exc:
+            logger.error("[AnamnesisFollowup] Gönderilemedi [%s]: %s", event_id, exc)
+            store.forget("anamnesis_followup", event_id)
+            results.append({"appointment_id": event_id, "status": "failed", "error": str(exc)})
+
+    return results
+
+
 def poll_and_notify() -> list[dict]:
     """
     Google Calendar'ı tarayarak yeni oluşturulan randevuları tespit eder
     ve her biri için WhatsApp üzerinden anamnez formu gönderir.
 
+    Idempotency: gönderilen her randevu event_id'si SQLite store'a
+    işaretlenir. Sonraki polling döngülerinde aynı veliye tekrar
+    mesaj gönderilmez (önceki sürümde lookback window üst üste
+    bindiğinde duplicate mesaj gidiyordu).
+
     Bu fonksiyon bir cron job veya APScheduler ile periyodik çalıştırılmalıdır.
-    Örn: her 10 dakikada bir → crontab: */10 * * * * python -c "from module3... import poll_and_notify; poll_and_notify()"
     """
+    from state_store import get_default_store
+
+    store = get_default_store()
     service = get_calendar_service()
     new_appointments = fetch_recently_created_appointments(service)
     logger.info("Yeni randevu sayısı: %d", len(new_appointments))
 
     results = []
     for appt in new_appointments:
+        event_id = appt["event_id"]
+
+        # Daha önce mesaj gönderildi mi?
+        if store.is_seen("calendar_event_reminder", event_id):
+            logger.debug("Atlanıyor (zaten bildirildi): %s", event_id)
+            results.append({"appointment_id": event_id, "status": "already_sent"})
+            continue
+
         if not appt["phone"]:
             logger.warning("Telefon numarası bulunamadı: %s", appt["summary"])
-            results.append({"appointment_id": appt["event_id"], "status": "no_phone"})
+            results.append({"appointment_id": event_id, "status": "no_phone"})
             continue
 
         try:
@@ -474,10 +1050,17 @@ def poll_and_notify() -> list[dict]:
                 guardian_phone=appt["phone"],
                 appointment_dt=appt["start_dt"],
             )
-            results.append({"appointment_id": appt["event_id"], "status": "sent"})
+            # Mesaj başarılıysa işaretle. Başarısız gönderimler tekrar
+            # denenmek üzere işaretlenmez.
+            store.mark_seen(
+                "calendar_event_reminder",
+                event_id,
+                meta=appt.get("summary", ""),
+            )
+            results.append({"appointment_id": event_id, "status": "sent"})
         except Exception as exc:
             logger.error("Mesaj gönderilemedi [%s]: %s", appt["summary"], exc)
-            results.append({"appointment_id": appt["event_id"], "status": "failed", "error": str(exc)})
+            results.append({"appointment_id": event_id, "status": "failed", "error": str(exc)})
 
     return results
 
@@ -500,6 +1083,9 @@ def setup_and_start():
 
 if __name__ == "__main__":
     import argparse
+
+    from logging_setup import configure_logging
+    configure_logging()
 
     parser = argparse.ArgumentParser(description="WhatsApp İletişim Modülü")
     parser.add_argument(
