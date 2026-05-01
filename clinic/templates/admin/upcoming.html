@@ -1,0 +1,38 @@
+{% extends "admin/base.html" %}
+{% block title %}Yaklaşan Randevular — Klinik Admin{% endblock %}
+{% block content %}
+<h1>Yaklaşan Randevular (7 gün)</h1>
+
+<div class="card">
+  {% if appointments %}
+  <table>
+    <thead>
+      <tr>
+        <th>Tarih</th>
+        <th>Hasta / Başlık</th>
+        <th>Telefon</th>
+        <th>Event ID</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in appointments %}
+      <tr>
+        <td><code>{{ a.start[:16].replace('T', ' ') }}</code></td>
+        <td>{{ a.summary or '—' }}</td>
+        <td>
+          {% if a.phone %}
+            ✓
+          {% else %}
+            <span class="badge warn">Yok</span>
+          {% endif %}
+        </td>
+        <td><code class="muted">{{ a.event_id[:12] }}…</code></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Önümüzdeki 7 günde randevu yok</div>
+  {% endif %}
+</div>
+{% endblock %}

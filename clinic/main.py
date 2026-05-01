@@ -30,16 +30,23 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Callable
+
+# .env dosyasını modül importlarından ÖNCE yükle ki alt modüller
+# os.getenv() çağrılarını doğru değerlerle başlatabilsin.
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Modül içe aktarımları
 # ---------------------------------------------------------------------------
 
-from module1_transcription_engine import (
-    AUDIO_INBOX_DIR,
-    get_calendar_service as get_calendar_service_m1,
-    process_audio_file,
-)
+# Modül 1 (faster-whisper, pyannote, ollama) ağır ML bağımlılıkları
+# içeriyor; main.py CLI veya admin/payment testlerinde de import
+# edildiğinde gereksiz yere bunları zorunlu kılıyordu. AudioLoop
+# çalıştırıldığında lazy import ediyoruz.
+
 from module2_notion_archiver import (
     archive_patient_session,
     fetch_form_responses,
@@ -50,26 +57,24 @@ from module3_whatsapp_communicator import (
     configure_instance_events,
     configure_webhook,
     get_instance_status,
+    poll_anamnesis_followup,
     poll_and_notify,
+    poll_upcoming_reminders,
 )
 from module4_esmm_generator import (
     CollectionRecord,
     process_collection,
 )
-from module5_migration import migrate_directory
+# M5 (python-docx) sadece --migrate CLI'da kullanılır; lazy import
+# ile webhook server / admin testlerini bağımlı bırakmıyoruz.
 
 # ---------------------------------------------------------------------------
-# Loglama
+# Loglama (rotation + PII maskeleme)
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("clinic.log", encoding="utf-8"),
-    ],
-)
+from logging_setup import configure_logging
+
+configure_logging()
 logger = logging.getLogger("main")
 
 # ---------------------------------------------------------------------------
@@ -79,6 +84,11 @@ logger = logging.getLogger("main")
 GOOGLE_ANAMNESIS_FORM_ID = os.getenv("GOOGLE_ANAMNESIS_FORM_ID", "")
 AUDIO_POLL_INTERVAL_SEC = int(os.getenv("AUDIO_POLL_INTERVAL_SEC", "60"))
 CALENDAR_POLL_INTERVAL_SEC = int(os.getenv("CALENDAR_POLL_INTERVAL_SEC", "600"))
+# Yaklaşan randevu hatırlatma cron'ları (saniye)
+REMINDER_24H_INTERVAL_SEC = int(os.getenv("REMINDER_24H_INTERVAL_SEC", "900"))   # 15 dk
+REMINDER_1H_INTERVAL_SEC = int(os.getenv("REMINDER_1H_INTERVAL_SEC", "300"))     # 5 dk
+# Anamnez doldurmayan velilere takip mesajı (saatte bir)
+ANAMNESIS_FOLLOWUP_INTERVAL_SEC = int(os.getenv("ANAMNESIS_FOLLOWUP_INTERVAL_SEC", "3600"))
 WEBHOOK_LISTEN_PORT = int(os.getenv("WEBHOOK_LISTEN_PORT", "5055"))
 
 # ---------------------------------------------------------------------------
@@ -91,7 +101,23 @@ def _audio_inbox_loop():
     Yeni ses dosyası bulunursa:
       1. Modül 1 → transkripsiyon + SOAP JSON
       2. Modül 2 → Notion'a arşivle
+
+    Idempotency: Her ses dosyası içerik SHA-256'sıyla state store'a
+    işaretlenir. Yarıda kalmış (taşınmamış) bir dosya yeniden
+    işlenmez — başka bir hasta için duplicate Notion sayfası
+    oluşmasını engeller.
     """
+    # M1 lazy import — ağır ML bağımlılıkları yalnızca AudioLoop
+    # gerçekten başlatıldığında yüklenir.
+    from module1_transcription_engine import (
+        AUDIO_INBOX_DIR,
+        get_calendar_service as get_calendar_service_m1,
+        process_audio_file,
+    )
+    from state_store import file_sha256, get_default_store
+
+    store = get_default_store()
+
     logger.info("[AudioLoop] Başlatıldı | klasör: %s | aralık: %ds",
                 AUDIO_INBOX_DIR, AUDIO_POLL_INTERVAL_SEC)
 
@@ -118,24 +144,79 @@ def _audio_inbox_loop():
 
         for audio_file in audio_files:
             try:
+                file_hash = file_sha256(audio_file)
+
+                # Aynı içerik daha önce işlenmiş mi?
+                if store.is_seen("audio_file", file_hash):
+                    logger.warning(
+                        "[AudioLoop] Dosya daha önce işlenmiş, taşınıyor: %s",
+                        audio_file.name,
+                    )
+                    audio_file.rename(processed_dir / audio_file.name)
+                    continue
+
                 logger.info("[AudioLoop] İşleniyor: %s", audio_file.name)
 
                 # Modül 1: Transkripsiyon + SOAP
                 soap_notes = process_audio_file(audio_file, calendar_service)
 
-                # Modül 2: Her SOAP notu için Notion arşivi
+                # Modül 2: Her SOAP notu için Notion arşivi.
+                # Her appointment_id de ayrıca işaretlenir (M2 idempotency).
                 for soap_note in soap_notes:
+                    # Risk alarmı: Notion arşivinden ÖNCE değerlendir;
+                    # arşiv hata verirse bile doktora bildirim gitmiş olur.
+                    try:
+                        from risk_alerts import evaluate_and_alert
+                        risk_result = evaluate_and_alert(soap_note)
+                        if risk_result["level"] != "none":
+                            logger.warning(
+                                "[AudioLoop] RİSK [%s] tespit edildi: %s | alarm=%s",
+                                risk_result["level"],
+                                soap_note.get("patient_name"),
+                                "gönderildi" if risk_result["alert_sent"] else "atlandı/başarısız",
+                            )
+                    except Exception as exc:
+                        logger.error("[AudioLoop] Risk alarmı hatası: %s", exc)
+
+                    # İlaç takibi (NOTION_MEDICATIONS_DATABASE_ID set ise)
+                    try:
+                        from medications import reconcile_medications_from_soap
+                        med_result = reconcile_medications_from_soap(soap_note)
+                        if med_result.get("added") or med_result.get("ended"):
+                            logger.info(
+                                "[AudioLoop] İlaç reconcile: +%d -%d | %s",
+                                len(med_result.get("added", [])),
+                                len(med_result.get("ended", [])),
+                                soap_note.get("patient_name"),
+                            )
+                    except Exception as exc:
+                        logger.error("[AudioLoop] İlaç reconcile hatası: %s", exc)
+
+                    appt_key = soap_note.get("appointment_id", "")
+                    if appt_key and store.is_seen("soap_archive", appt_key):
+                        logger.info(
+                            "[AudioLoop] SOAP zaten arşivlenmiş, atlanıyor: %s",
+                            appt_key,
+                        )
+                        continue
                     try:
                         archive_patient_session(
                             soap_note=soap_note,
                             form_id=GOOGLE_ANAMNESIS_FORM_ID,
                             all_form_responses=all_form_responses,
                         )
+                        if appt_key:
+                            store.mark_seen(
+                                "soap_archive",
+                                appt_key,
+                                meta=soap_note.get("patient_name", ""),
+                            )
                     except Exception as exc:
                         logger.error("[AudioLoop] Notion arşiv hatası [%s]: %s",
                                      soap_note.get("patient_name"), exc)
 
-                # İşlenen dosyayı taşı
+                # Tüm SOAP'lar işlendi → ses dosyasını taşı + işaretle
+                store.mark_seen("audio_file", file_hash, meta=audio_file.name)
                 audio_file.rename(processed_dir / audio_file.name)
 
             except Exception as exc:
@@ -165,15 +246,90 @@ def _calendar_poll_loop():
         time.sleep(CALENDAR_POLL_INTERVAL_SEC)
 
 
+def _reminder_loop(horizon: str, interval_sec: int):
+    """
+    Yaklaşan randevular için (24h veya 1h önce) hatırlatma cron'u.
+    Her (event_id, horizon) için state_store ile idempotent.
+    """
+    logger.info(
+        "[Reminder %s] Başlatıldı | aralık: %ds", horizon, interval_sec
+    )
+    while True:
+        try:
+            results = poll_upcoming_reminders(horizon)
+            sent = sum(1 for r in results if r.get("status") == "sent")
+            if sent:
+                logger.info(
+                    "[Reminder %s] %d hatırlatma gönderildi", horizon, sent
+                )
+        except Exception as exc:
+            logger.error("[Reminder %s] Hata: %s", horizon, exc)
+        time.sleep(interval_sec)
+
+
+def _reminder_24h_loop():
+    _reminder_loop("24h", REMINDER_24H_INTERVAL_SEC)
+
+
+def _reminder_1h_loop():
+    _reminder_loop("1h", REMINDER_1H_INTERVAL_SEC)
+
+
+def _calendar_watch_loop():
+    """
+    Calendar Watch (push) aktifse expiration yaklaşınca otomatik yeniler.
+    Push devre dışıysa loop kendini bypass eder.
+    """
+    from calendar_watch import watch_renewal_loop
+    watch_renewal_loop(check_interval_sec=3600)
+
+
+def _anamnesis_followup_loop():
+    """
+    İlk anamnez mesajı gönderilmiş ama hâlâ form yanıtı bulunmayan
+    velilere ikinci hatırlatma gönderir. Saatte bir tarar.
+    """
+    logger.info(
+        "[AnamnesisFollowup] Başlatıldı | aralık: %ds",
+        ANAMNESIS_FOLLOWUP_INTERVAL_SEC,
+    )
+    while True:
+        try:
+            results = poll_anamnesis_followup()
+            sent = sum(1 for r in results if r.get("status") == "sent")
+            if sent:
+                logger.info(
+                    "[AnamnesisFollowup] %d takip mesajı gönderildi", sent
+                )
+        except Exception as exc:
+            logger.error("[AnamnesisFollowup] Hata: %s", exc)
+        time.sleep(ANAMNESIS_FOLLOWUP_INTERVAL_SEC)
+
+
 # ---------------------------------------------------------------------------
 # İş Parçacığı 3: Webhook Sunucusu (Modül 3 + tetikleyici)
 # ---------------------------------------------------------------------------
 
 def _webhook_server():
     """
-    Evolution API webhook'unu dinler.
-    İptal/erteleme mesajlarını işler.
+    Evolution API webhook'unu + admin paneli dinler.
+    İptal/erteleme mesajlarını işler, /webhook/payment ile e-SMM
+    tetikler, /admin/* ile operasyonel görünürlük sağlar.
     """
+    # Admin paneli kayıt (token yoksa 404 olarak gizli kalır)
+    try:
+        from admin_panel import register as register_admin
+        register_admin(flask_app)
+    except Exception as exc:
+        logger.warning("[Webhook] Admin paneli kayıt edilemedi: %s", exc)
+
+    # Admin Web UI
+    try:
+        from admin_ui import register as register_admin_ui
+        register_admin_ui(flask_app)
+    except Exception as exc:
+        logger.warning("[Webhook] Admin UI kayıt edilemedi: %s", exc)
+
     logger.info("[Webhook] Flask sunucusu başlatılıyor (port=%d)", WEBHOOK_LISTEN_PORT)
     flask_app.run(host="0.0.0.0", port=WEBHOOK_LISTEN_PORT, debug=False, use_reloader=False)
 
@@ -186,18 +342,27 @@ def trigger_esmm(
     patient_name: str,
     guardian_phone: str,
     tax_id: str,
-    amount: float,
+    amount,  # Decimal | float | int | str — CollectionRecord.__post_init__ Decimal'a çevirir
     description: str = "Çocuk ve Ergen Psikiyatrisi Muayenesi",
     appointment_date: str = "",
+    collection_key: str = "",
 ) -> dict:
     """
     Tahsilat sonrası çağrılan fonksiyon.
     Modül 4'ü tetikler: e-SMM kes → PDF çek → WhatsApp ile ilet.
 
-    Örnek kullanım (dışarıdan):
-        from main import trigger_esmm
-        trigger_esmm("Ahmet Yılmaz", "05321234567", "12345678901", 1500.0)
+    collection_key: Aynı tahsilatın iki kez fatura kesilmesini engelleyen
+    idempotency anahtarı. Verilmezse tax_id+date+amount'tan üretilir.
+    Yine de POS/manuel tetikleyicinin gerçek tahsilat ID'sini geçmesi
+    en güvenlisi.
+
+    Örnek:
+        trigger_esmm("Ahmet Y.", "05321234567", "12345678901", "1500.00",
+                     collection_key="pos-tx-9421")
     """
+    from state_store import get_default_store
+
+    store = get_default_store()
     record = CollectionRecord(
         patient_name=patient_name,
         guardian_phone=guardian_phone,
@@ -206,7 +371,21 @@ def trigger_esmm(
         description=description,
         appointment_date=appointment_date,
     )
-    return process_collection(record)
+
+    key = collection_key or f"{tax_id}:{appointment_date}:{record.amount}"
+    if not store.claim("esmm_invoice", key, meta=patient_name):
+        logger.warning(
+            "trigger_esmm | Bu tahsilat (%s) için e-SMM zaten kesilmiş; atlandı.",
+            key,
+        )
+        return {"status": "duplicate_skipped", "key": key, "patient": patient_name}
+
+    try:
+        return process_collection(record)
+    except Exception:
+        # Başarısız çağrıyı yeniden denemeye izin vermek için claim'i geri al
+        store.forget("esmm_invoice", key)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +406,13 @@ def run_setup():
     except Exception as exc:
         logger.error("Kurulum hatası: %s", exc)
 
+    # Calendar Watch (opsiyonel)
+    try:
+        from calendar_watch import start_watch
+        start_watch()
+    except Exception as exc:
+        logger.warning("Calendar Watch başlatılamadı: %s", exc)
+
 
 # ---------------------------------------------------------------------------
 # Ana Başlatıcı
@@ -236,29 +422,45 @@ def start_clinic_system():
     """
     Tüm arka plan iş parçacıklarını başlatır ve ana süreç olarak bekler.
     Ctrl+C ile durdurulabilir.
+
+    Bir thread öldüğünde aynı Thread nesnesi yeniden start()
+    edilemez (Python'da RuntimeError fırlatır). Bu nedenle
+    thread'leri name → factory eşlemesinde tutuyoruz; ölen
+    thread'in yerine yeni bir Thread nesnesi yaratılır.
     """
     logger.info("=" * 60)
     logger.info("Klinik Yönetim Sistemi başlatılıyor...")
     logger.info("=" * 60)
 
-    threads = [
-        threading.Thread(target=_audio_inbox_loop, name="AudioLoop", daemon=True),
-        threading.Thread(target=_calendar_poll_loop, name="CalendarLoop", daemon=True),
-        threading.Thread(target=_webhook_server, name="WebhookServer", daemon=True),
-    ]
+    thread_specs: dict[str, Callable[[], None]] = {
+        "AudioLoop": _audio_inbox_loop,
+        "CalendarLoop": _calendar_poll_loop,
+        "CalendarWatch": _calendar_watch_loop,
+        "Reminder24h": _reminder_24h_loop,
+        "Reminder1h": _reminder_1h_loop,
+        "AnamnesisFollowup": _anamnesis_followup_loop,
+        "WebhookServer": _webhook_server,
+    }
 
-    for t in threads:
+    def _spawn(name: str) -> threading.Thread:
+        t = threading.Thread(target=thread_specs[name], name=name, daemon=True)
         t.start()
-        logger.info("İş parçacığı başlatıldı: %s", t.name)
+        logger.info("İş parçacığı başlatıldı: %s", name)
+        return t
+
+    threads: dict[str, threading.Thread] = {
+        name: _spawn(name) for name in thread_specs
+    }
 
     logger.info("Sistem çalışıyor. Durdurmak için Ctrl+C.")
     try:
         while True:
-            # Tüm iş parçacıklarının sağlığını kontrol et
-            for t in threads:
+            for name, t in list(threads.items()):
                 if not t.is_alive():
-                    logger.error("İş parçacığı durdu: %s — yeniden başlatılıyor", t.name)
-                    t.start()
+                    logger.error(
+                        "İş parçacığı durdu: %s — yeniden başlatılıyor", name
+                    )
+                    threads[name] = _spawn(name)
             time.sleep(30)
     except KeyboardInterrupt:
         logger.info("Sistem durduruldu.")
@@ -302,6 +504,7 @@ Modlar:
 
     if args.migrate:
         ext = ["docx", "md"] if args.ext == "both" else [args.ext]
+        from module5_migration import migrate_directory
         migrate_directory(source_dir=args.dir, extensions=ext, dry_run=args.dry_run)
 
     elif args.webhook_only:

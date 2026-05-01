@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Klinik runtime artifacts
+clinic/.env
+clinic/clinic.log
+clinic/clinic_state.db
+clinic/clinic_state.db-wal
+clinic/clinic_state.db-shm
+clinic/patient_registry.db
+clinic/patient_registry.db-wal
+clinic/patient_registry.db-shm
+clinic/audit_log.db
+clinic/audit_log.db-wal
+clinic/audit_log.db-shm
+clinic/audio_inbox/
+clinic/audio_processed/
+clinic/credentials.json
+clinic/token.json
+clinic/*.soap.json
+
+# Runtime artifact'ler — test cwd'sine bağlı olarak repo kökünde
+# de oluşabilir; generic pattern ile her yerde yoksay.
+*.log
+*.db
+*.db-wal
+*.db-shm
+
+# OS
+.DS_Store
+Thumbs.db

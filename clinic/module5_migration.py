@@ -22,14 +22,16 @@ import re
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import requests
 from docx import Document
 from markdown_it import MarkdownIt
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+from http_retry import raise_for_retry, with_retry
+
 logger = logging.getLogger("migration")
 
 # ---------------------------------------------------------------------------
@@ -61,18 +63,20 @@ def _headers() -> dict:
     }
 
 
+@with_retry()
 def _post(endpoint: str, payload: dict) -> dict:
     url = f"{NOTION_BASE_URL}{endpoint}"
     resp = requests.post(url, headers=_headers(), json=payload, timeout=30)
-    resp.raise_for_status()
+    raise_for_retry(resp)
     time.sleep(REQUEST_DELAY_SEC)
     return resp.json()
 
 
+@with_retry()
 def _patch(endpoint: str, payload: dict) -> dict:
     url = f"{NOTION_BASE_URL}{endpoint}"
     resp = requests.patch(url, headers=_headers(), json=payload, timeout=30)
-    resp.raise_for_status()
+    raise_for_retry(resp)
     time.sleep(REQUEST_DELAY_SEC)
     return resp.json()
 
@@ -431,6 +435,9 @@ def migrate_directory(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    from logging_setup import configure_logging
+    configure_logging()
+
     parser = argparse.ArgumentParser(
         description="Samsung Notes → Notion Toplu Migrasyon",
         formatter_class=argparse.RawDescriptionHelpFormatter,

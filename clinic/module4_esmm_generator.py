@@ -22,17 +22,23 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Optional, Union
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 import requests
 
-# Modül 3'ten WhatsApp gönderim fonksiyonunu içe aktar
-from module3_whatsapp_communicator import send_whatsapp_message
+from http_retry import raise_for_retry, with_retry
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+# M3'ten gelen WhatsApp send fonksiyonu sadece send_pdf_via_whatsapp
+# içinde lazy import edilir; M4'ün test edilmesi M3'ün ağır
+# bağımlılıklarını (Flask, google-auth) zorunlu kılmasın diye top-level
+# import etmiyoruz.
+
+# Loglama yapılandırması logging_setup tarafından merkezi yapılır.
 logger = logging.getLogger("esmm_generator")
 
 # ---------------------------------------------------------------------------
@@ -53,6 +59,37 @@ JOB_POLL_INTERVAL_SEC = int(os.getenv("JOB_POLL_INTERVAL_SEC", "8"))
 JOB_POLL_MAX_RETRIES = int(os.getenv("JOB_POLL_MAX_RETRIES", "30"))
 
 # ---------------------------------------------------------------------------
+# Vergi oranları (mali müşavirle teyit edilmesi zorunlu — varsayılanlar
+# Türkiye'de serbest meslek erbabı doktor için yaygın değerler:
+#   - KDV: psikiyatri muayenesi KDV'den muaf (%0). Genel SMM'de %10/20 olabilir.
+#   - Gelir vergisi stopajı: %20 (193 sayılı GVK m.94)
+# Önceki sürüm her ikisini sıfır yazıyordu → düşük vergi kesimi → mali risk.
+# ---------------------------------------------------------------------------
+
+def _decimal_env(name: str, default: str) -> Decimal:
+    raw = os.getenv(name, default).strip().replace(",", ".")
+    return Decimal(raw)
+
+
+VAT_RATE = _decimal_env("VAT_RATE", "0")              # KDV oranı (%)
+WITHHOLDING_RATE = _decimal_env("WITHHOLDING_RATE", "20")  # Gelir vergisi stopajı (%)
+VAT_WITHHOLDING_RATE = _decimal_env("VAT_WITHHOLDING_RATE", "0")  # KDV tevkifatı (%)
+
+# Para birimi yuvarlama yardımcısı (kuruş hassasiyeti)
+MONEY_QUANT = Decimal("0.01")
+
+
+def _to_money(value: Union[Decimal, float, int, str]) -> Decimal:
+    """Float girdileri güvenli biçimde Decimal'a çevirir, 2 hane yuvarlar."""
+    if isinstance(value, Decimal):
+        amount = value
+    else:
+        # str() float'ın repr'ini koruyarak Decimal'e geçer; binary float
+        # sapmasını minimize eder.
+        amount = Decimal(str(value))
+    return amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+# ---------------------------------------------------------------------------
 # Veri Yapıları
 # ---------------------------------------------------------------------------
 
@@ -68,11 +105,16 @@ class CollectionRecord:
     """Tahsilat kaydı — dışarıdan tetikleyici bu nesneyi sağlar."""
     patient_name: str
     guardian_phone: str
-    tax_id: str           # VKN (10 hane) veya TCKN (11 hane)
-    amount: float         # TL cinsinden tutar
-    description: str      # SMM açıklaması, örn: "Psikiyatri Muayenesi"
-    appointment_date: str # ISO format: "2026-04-01"
-    contact_id: Optional[str] = None  # Paraşüt contact_id (varsa önceden biliniyorsa)
+    tax_id: str                       # VKN (10 hane) veya TCKN (11 hane)
+    # Para tutarı: float kabul edilir ama dahilde Decimal'a çevrilir
+    # (kuruş hassasiyeti için). __post_init__ ile normalize edilir.
+    amount: Union[Decimal, float, int, str]
+    description: str                  # SMM açıklaması
+    appointment_date: str             # ISO format: "2026-04-01"
+    contact_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.amount = _to_money(self.amount)
 
 
 # ---------------------------------------------------------------------------
@@ -102,9 +144,13 @@ def get_access_token() -> str:
         "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
     }
 
-    resp = requests.post(PARASUT_TOKEN_URL, data=payload, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
+    @with_retry(max_attempts=3)
+    def _request_token() -> dict:
+        resp = requests.post(PARASUT_TOKEN_URL, data=payload, timeout=15)
+        raise_for_retry(resp)
+        return resp.json()
+
+    data = _request_token()
 
     _token_cache = TokenBundle(
         access_token=data["access_token"],
@@ -127,6 +173,27 @@ def _api_url(path: str) -> str:
     return f"{PARASUT_BASE_URL}/{PARASUT_COMPANY_ID}{path}"
 
 
+@with_retry()
+def _parasut_get(path: str, params: Optional[dict] = None, timeout: int = 15) -> dict:
+    """Paraşüt v4 GET — retry/backoff sarmalayıcısı."""
+    resp = requests.get(_api_url(path), headers=_headers(), params=params, timeout=timeout)
+    raise_for_retry(resp)
+    return resp.json()
+
+
+@with_retry()
+def _parasut_post(path: str, payload: Optional[dict] = None, timeout: int = 20) -> dict:
+    """Paraşüt v4 POST — retry/backoff sarmalayıcısı."""
+    resp = requests.post(
+        _api_url(path),
+        headers=_headers(),
+        json=payload if payload is not None else {},
+        timeout=timeout,
+    )
+    raise_for_retry(resp)
+    return resp.json()
+
+
 # ---------------------------------------------------------------------------
 # 2. e-Fatura Gelen Kutusu Sorgusu (Mükellef Kontrolü)
 # ---------------------------------------------------------------------------
@@ -136,14 +203,7 @@ def is_e_invoice_taxpayer(tax_id: str) -> bool:
     Verilen VKN/TCKN'nin e-Fatura mükellefi olup olmadığını sorgular.
     Mükellefse True, değilse False döner (e-SMM kesilmeli).
     """
-    resp = requests.get(
-        _api_url("/e_invoice_inboxes"),
-        headers=_headers(),
-        params={"filter[vkn]": tax_id},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    data = _parasut_get("/e_invoice_inboxes", params={"filter[vkn]": tax_id})
     inboxes = data.get("data", [])
     result = len(inboxes) > 0
     logger.info(
@@ -167,14 +227,8 @@ def find_or_create_contact(record: CollectionRecord) -> str:
         return record.contact_id
 
     # VKN/TCKN'ye göre ara
-    resp = requests.get(
-        _api_url("/contacts"),
-        headers=_headers(),
-        params={"filter[tax_number]": record.tax_id},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    existing = resp.json().get("data", [])
+    data = _parasut_get("/contacts", params={"filter[tax_number]": record.tax_id})
+    existing = data.get("data", [])
     if existing:
         contact_id = existing[0]["id"]
         logger.info("Mevcut contact bulundu: %s", contact_id)
@@ -194,14 +248,7 @@ def find_or_create_contact(record: CollectionRecord) -> str:
             },
         }
     }
-    resp = requests.post(
-        _api_url("/contacts"),
-        headers=_headers(),
-        json=payload,
-        timeout=15,
-    )
-    resp.raise_for_status()
-    contact_id = resp.json()["data"]["id"]
+    contact_id = _parasut_post("/contacts", payload)["data"]["id"]
     logger.info("Yeni contact oluşturuldu: %s (%s)", record.patient_name, contact_id)
     return contact_id
 
@@ -217,20 +264,27 @@ def create_esmm(record: CollectionRecord, contact_id: str) -> str:
     """
     issue_date = record.appointment_date or datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
 
+    # Decimal değerleri JSON'a string olarak gönderiyoruz; Paraşüt API
+    # numeric string kabul eder ve float yuvarlama hatasından kaçınılır.
+    unit_price_str = str(_to_money(record.amount))
+    vat_rate_str = str(VAT_RATE)
+    withholding_rate_str = str(WITHHOLDING_RATE)
+    vat_withholding_rate_str = str(VAT_WITHHOLDING_RATE)
+
     payload = {
         "data": {
             "type": "sales_invoices",
             "attributes": {
-                "item_type": "invoice",           # e-SMM türü
+                "item_type": "invoice",
                 "description": record.description,
                 "issue_date": issue_date,
                 "due_date": issue_date,
                 "invoice_series": "SMM",
-                "invoice_id": 0,                  # Paraşüt otomatik atar
+                "invoice_id": 0,
                 "currency": "TRL",
                 "exchange_rate": 1,
-                "withholding_rate": 0,
-                "vat_withholding_rate": 0,
+                "withholding_rate": withholding_rate_str,
+                "vat_withholding_rate": vat_withholding_rate_str,
                 "invoice_discount_type": "percentage",
                 "invoice_discount": 0,
                 "billing_address": "",
@@ -240,7 +294,7 @@ def create_esmm(record: CollectionRecord, contact_id: str) -> str:
                 "tax_number": record.tax_id,
                 "country": "Turkey",
                 "is_abroad": False,
-                "e_invoice": False,    # e-SMM → False (e-Fatura değil)
+                "e_invoice": False,
                 "e_archive": False,
                 "e_smm": True,
             },
@@ -254,8 +308,8 @@ def create_esmm(record: CollectionRecord, contact_id: str) -> str:
                             "type": "sales_invoice_details",
                             "attributes": {
                                 "quantity": 1,
-                                "unit_price": record.amount,
-                                "vat_rate": 0,       # Psikiyatri muayenesi KDV'den muaf
+                                "unit_price": unit_price_str,
+                                "vat_rate": vat_rate_str,
                                 "discount_type": "percentage",
                                 "discount_value": 0,
                                 "description": record.description,
@@ -274,27 +328,21 @@ def create_esmm(record: CollectionRecord, contact_id: str) -> str:
             },
         }
     }
-
-    resp = requests.post(
-        _api_url("/sales_invoices"),
-        headers=_headers(),
-        json=payload,
-        timeout=20,
+    logger.info(
+        "e-SMM payload | tutar: %s TL | KDV: %%%s | stopaj: %%%s | KDV tevk.: %%%s",
+        unit_price_str, vat_rate_str, withholding_rate_str, vat_withholding_rate_str,
     )
-    resp.raise_for_status()
-    response_data = resp.json()
+
+    response_data = _parasut_post("/sales_invoices", payload, timeout=20)
+    invoice_id = response_data["data"]["id"]
 
     # Asenkron işlem başlatma
-    job_resp = requests.post(
-        _api_url(f"/sales_invoices/{response_data['data']['id']}/issue_smm"),
-        headers=_headers(),
-        json={},
-        timeout=15,
+    job_resp = _parasut_post(f"/sales_invoices/{invoice_id}/issue_smm", {})
+    job_id = job_resp["data"]["id"]
+    logger.info(
+        "e-SMM oluşturma başlatıldı | invoice_id: %s | job_id: %s",
+        invoice_id, job_id,
     )
-    job_resp.raise_for_status()
-    job_id = job_resp.json()["data"]["id"]
-    logger.info("e-SMM oluşturma başlatıldı | invoice_id: %s | job_id: %s",
-                response_data["data"]["id"], job_id)
     return job_id
 
 
@@ -307,12 +355,9 @@ def poll_job_until_done(job_id: str) -> dict:
     Paraşüt trackable job'ını 'done' statüsüne geçene kadar periyodik sorgular.
     Başarıda iş sonuç verisini, başarısızlıkta exception fırlatır.
     """
-    url = _api_url(f"/trackable_jobs/{job_id}")
-
     for attempt in range(1, JOB_POLL_MAX_RETRIES + 1):
-        resp = requests.get(url, headers=_headers(), timeout=15)
-        resp.raise_for_status()
-        job_data = resp.json().get("data", {})
+        result = _parasut_get(f"/trackable_jobs/{job_id}")
+        job_data = result.get("data", {})
         status = job_data.get("attributes", {}).get("status", "")
         progress = job_data.get("attributes", {}).get("progress", 0)
 
@@ -343,14 +388,10 @@ def fetch_pdf_url(invoice_id: str) -> str:
     Tamamlanan e-SMM'nin imzalı PDF indirme linkini çeker.
     Döner: PDF URL
     """
-    resp = requests.get(
-        _api_url(f"/sales_invoices/{invoice_id}"),
-        headers=_headers(),
+    data = _parasut_get(
+        f"/sales_invoices/{invoice_id}",
         params={"include": "active_e_document"},
-        timeout=15,
     )
-    resp.raise_for_status()
-    data = resp.json()
 
     # Önce included içindeki e_document'tan PDF linkini al
     for included in data.get("included", []):
@@ -388,14 +429,10 @@ def send_pdf_via_whatsapp(phone: str, patient_name: str, pdf_url: str) -> dict:
     Evolution API üzerinden e-SMM PDF'ini WhatsApp mesajı olarak iletir.
     PDF URL doküman olarak gönderilir; ek metin açıklaması eklenir.
     """
-    from module3_whatsapp_communicator import (
-        EVOLUTION_INSTANCE_NAME,
-        _evo_headers,
-        _evo_post,
-        _normalize_phone,
-    )
+    from module3_whatsapp_communicator import EVOLUTION_INSTANCE_NAME, _evo_post
+    from phone_utils import normalize_phone
 
-    normalized = _normalize_phone(phone)
+    normalized = normalize_phone(phone)
     caption = (
         f"Merhaba {patient_name} velisi,\n"
         f"Seans makbuzunuz hazırlanmıştır. "
@@ -435,7 +472,7 @@ def process_collection(record: CollectionRecord) -> dict:
 
     Döner: {'invoice_id', 'pdf_url', 'whatsapp_status'}
     """
-    logger.info("Tahsilat işleniyor: %s | %.2f TL", record.patient_name, record.amount)
+    logger.info("Tahsilat işleniyor: %s | %s TL", record.patient_name, record.amount)
 
     # 1. Mükellef kontrolü
     is_taxpayer = is_e_invoice_taxpayer(record.tax_id)
@@ -495,11 +532,14 @@ async def process_collection_async(record: CollectionRecord) -> dict:
 if __name__ == "__main__":
     import argparse
 
+    from logging_setup import configure_logging
+    configure_logging()
+
     parser = argparse.ArgumentParser(description="e-SMM Otomasyon Modülü")
     parser.add_argument("--patient-name", required=True)
     parser.add_argument("--phone", required=True, help="Veli WhatsApp numarası")
     parser.add_argument("--tax-id", required=True, help="VKN (10) veya TCKN (11)")
-    parser.add_argument("--amount", required=True, type=float, help="Tahsilat tutarı (TL)")
+    parser.add_argument("--amount", required=True, type=str, help="Tahsilat tutarı (TL, örn: 1500.00)")
     parser.add_argument("--description", default="Çocuk ve Ergen Psikiyatrisi Muayenesi")
     parser.add_argument(
         "--date",

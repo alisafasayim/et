@@ -1,0 +1,94 @@
+{% extends "admin/base.html" %}
+{% block title %}Dashboard — Klinik Admin{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="grid cols-3">
+  <div class="card">
+    <div class="stat-label">WhatsApp</div>
+    {% if health.whatsapp == 'open' %}
+      <p class="stat" style="color: var(--success);">✓ Bağlı</p>
+    {% else %}
+      <p class="stat" style="color: var(--error);">✗ {{ health.whatsapp }}</p>
+    {% endif %}
+  </div>
+  <div class="card">
+    <div class="stat-label">State Store</div>
+    {% if health.state_store == 'ok' %}
+      <p class="stat" style="color: var(--success);">✓ Aktif</p>
+    {% else %}
+      <p class="stat" style="color: var(--error);">{{ health.state_store }}</p>
+    {% endif %}
+  </div>
+  <div class="card">
+    <div class="stat-label">Audit Kayıtları</div>
+    <p class="stat">{{ recent_audit|length }}</p>
+    <a href="{{ url_for('admin_ui.audit_view') }}" class="muted">Tümünü gör →</a>
+  </div>
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <h2>State Store Namespace'leri</h2>
+    {% if namespace_counts %}
+    <table>
+      <thead><tr><th>Namespace</th><th>Kayıt</th></tr></thead>
+      <tbody>
+        {% for ns, count in namespace_counts %}
+        <tr><td><code>{{ ns }}</code></td><td>{{ count }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">Henüz kayıt yok</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Manuel Tetikleyiciler</h2>
+    <form method="post" action="{{ url_for('admin_ui.trigger_reminder') }}" style="margin-bottom: 16px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label for="horizon">Hatırlatma horizonu</label>
+      <select name="horizon" id="horizon">
+        <option value="24h">24 saat sonrası</option>
+        <option value="1h">1 saat sonrası</option>
+      </select>
+      <button type="submit" style="margin-top: 8px;">Hatırlatma Gönder</button>
+    </form>
+    <a href="{{ url_for('admin_ui.trigger_esmm') }}" class="btn secondary">Manuel e-SMM Kes</a>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Son Audit Olayları</h2>
+  {% if recent_audit %}
+  <table>
+    <thead>
+      <tr>
+        <th>Zaman</th>
+        <th>Eylem</th>
+        <th>Aktör</th>
+        <th>Hasta</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in recent_audit %}
+      <tr>
+        <td><code>{{ e.ts[:19] }}</code></td>
+        <td>{{ e.action }}</td>
+        <td>{{ e.actor }}</td>
+        <td>
+          {% if e.patient_uuid %}
+            <a href="{{ url_for('admin_ui.patient_detail', patient_uuid=e.patient_uuid) }}"
+               class="pseudo">{{ e.patient_uuid[:8] }}...</a>
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">Audit log boş</div>
+  {% endif %}
+</div>
+{% endblock %}
