@@ -20,9 +20,15 @@ echo "[session-start] Klinik test bağımlılıkları kuruluyor..."
 # Web container'ında --user flag'i hem virtualenv hem system Python'da
 # çalışır. CI workflow ile aynı paket seti — 165 test geçer (sadece
 # M1 timezone testi M1 ML deps olmadığında importorskip ile skip).
-python3 -m pip install --quiet --user \
+#
+# --upgrade gerekiyor: web container imajındaki sistem cryptography paketi
+# kırık (`_cffi_backend` eksik). User-site'a güncel sürüm kurmazsak Python
+# kırık sistem paketini yükler ve `pyo3_runtime.PanicException` alırız.
+# cffi de açıkça listelenmeli; cryptography'nin C uzantısı buna bağlı.
+python3 -m pip install --quiet --user --upgrade \
   python-dotenv \
   tenacity \
+  cffi \
   cryptography \
   requests \
   flask \
