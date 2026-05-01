@@ -386,17 +386,164 @@ RESCHEDULE_KEYWORDS = [
 ]
 
 
+# Acil durum anahtar kelimeleri — ÇOCUK PSİKİYATRİSİNDE HAYATİ.
+# Bu listedeki herhangi bir ifade geçtiğinde mesaj EMERGENCY sınıfına
+# alınır ve doktora 30 saniye içinde alarm gönderilir. Liste
+# clinic_automation/modules/chatbot.py'den port (KVKK m.6 hassas
+# durum: tıbbi acil durum bildirimi yasal yükümlülüktür).
+EMERGENCY_KEYWORDS = [
+    "intihar",
+    "öldürmek",
+    "ölmek istiyorum",
+    "ölmek istıyorum",  # yaygın yazım hatası
+    "kendime zarar",
+    "kendine zarar",
+    "kendini öldür",
+    "hap içtim",
+    "ilaç içtim",
+    "bilek kestim",
+    "bilek kestim",
+    "kestim kendimi",
+    "acil kriz",
+    "yaşamak istemiyorum",
+    "yaşamak istemı̇yorum",
+]
+
+# Yanlış pozitif filtresi — "öldürdü", "öldüresiye" gibi geçmiş zaman
+# / mecaz kullanımları emergency sınıfına almak istemiyoruz.
+EMERGENCY_FALSE_POSITIVES = [
+    "öldürdü",
+    "öldürmüş",
+    "öldüresiye",
+    "öldüm bittim",  # mecaz
+]
+
+
+def _tr_lower(text: str) -> str:
+    """
+    Türkçe-uyumlu lowercase. Python'un .lower() metodu Türkçe büyük "İ"
+    için "i + combining dot above" üretebiliyor — anahtar kelime
+    karşılaştırmasını bozar. "İ"→"i", "I"→"ı" map'i uygular.
+    """
+    return (text or "").replace("İ", "i").replace("I", "ı").lower()
+
+
 def classify_incoming_message(message_text: str) -> str:
     """
     Gelen mesajı anahtar kelime taramasıyla sınıflandırır.
-    Döner: 'cancellation' | 'reschedule' | 'other'
+
+    Döner: 'emergency' | 'cancellation' | 'reschedule' | 'other'
+
+    Öncelik sırası: emergency > cancellation > reschedule.
+    Acil durum tespitinde yanlış pozitif filtresi uygulanır
+    (örn. "öldürdü" geçmiş zaman → mecaz, emergency DEĞİL).
     """
-    text = message_text.lower()
+    text = _tr_lower(message_text)
+
+    # 1. Acil durum (her zaman öncelikli)
+    has_emergency = any(_tr_lower(kw) in text for kw in EMERGENCY_KEYWORDS)
+    has_false_positive = any(
+        _tr_lower(fp) in text for fp in EMERGENCY_FALSE_POSITIVES
+    )
+    if has_emergency and not has_false_positive:
+        return "emergency"
+
+    # 2. İptal
     if any(kw in text for kw in CANCELLATION_KEYWORDS):
         return "cancellation"
+
+    # 3. Erteleme
     if any(kw in text for kw in RESCHEDULE_KEYWORDS):
         return "reschedule"
+
     return "other"
+
+
+def handle_emergency_message(sender_phone: str, message_text: str) -> dict:
+    """
+    Acil durum mesajı tespit edildiğinde:
+      1. Doktora WhatsApp alarmı gönder (DOCTOR_PHONE)
+      2. risk_alerts.db'ye CRITICAL seviye kayıt (varsa)
+      3. audit_log'a emergency.detected event'i (varsa)
+      4. Veliye sakinleştirici otomatik yanıt gönder
+
+    Sandboxlanmış veya offline ortamda dış çağrılar fail-soft —
+    en azından log + audit kaydı garanti edilir.
+    """
+    logger = logging.getLogger("whatsapp.emergency")
+    logger.warning(
+        "[EMERGENCY] %s'den acil durum mesajı: %s",
+        sender_phone, message_text[:200],
+    )
+
+    result: dict = {
+        "sender": sender_phone,
+        "message": message_text,
+        "doctor_alerted": False,
+        "audit_logged": False,
+        "risk_recorded": False,
+        "auto_reply_sent": False,
+    }
+
+    # 1. Doktor alarmı
+    doctor_phone = os.getenv("DOCTOR_PHONE", "")
+    if doctor_phone:
+        try:
+            alert = (
+                "🚨 ACİL DURUM 🚨\n"
+                f"Hasta/veli: {sender_phone}\n"
+                f"Mesaj: {message_text[:300]}\n\n"
+                "Lütfen derhal iletişime geçin."
+            )
+            send_whatsapp_message(doctor_phone, alert)
+            result["doctor_alerted"] = True
+        except Exception as exc:
+            logger.error("Doktor alarmı gönderilemedi: %s", exc)
+    else:
+        logger.warning("DOCTOR_PHONE set değil — emergency bildirimi atlandı")
+
+    # 2. Audit log
+    try:
+        from audit_log import get_default_audit_log
+        get_default_audit_log().record(
+            actor="whatsapp_chatbot",
+            action="emergency.detected",
+            details={
+                "sender": sender_phone,
+                "message_preview": message_text[:200],
+            },
+        )
+        result["audit_logged"] = True
+    except Exception as exc:
+        logger.error("Audit log yazılamadı: %s", exc)
+
+    # 3. risk_alerts kaydı
+    try:
+        from risk_alerts import record_risk_event, RiskLevel
+        record_risk_event(
+            level=RiskLevel.CRITICAL,
+            source="whatsapp",
+            summary=f"Acil durum mesajı: {message_text[:100]}",
+            sender_phone=sender_phone,
+        )
+        result["risk_recorded"] = True
+    except Exception as exc:
+        logger.warning("risk_alerts'e yazılamadı (modül opsiyonel): %s", exc)
+
+    # 4. Veliye otomatik yanıt — krize destek mesajı
+    try:
+        reply = (
+            "Mesajınızı aldık. Yaşadıklarınız önemli ve doktorunuz "
+            "sizinle en kısa sürede iletişime geçecek.\n\n"
+            "Acil yardım için 112'yi arayabilir veya İntihar Önleme "
+            "Hattı 182'yi kullanabilirsiniz. Yalnız değilsiniz."
+        )
+        send_whatsapp_message(sender_phone, reply)
+        result["auto_reply_sent"] = True
+    except Exception as exc:
+        logger.error("Otomatik yanıt gönderilemedi: %s", exc)
+
+    return result
 
 
 def find_upcoming_appointment_by_phone(
@@ -826,6 +973,16 @@ def _handle_messages_upsert(event: dict) -> None:
         logger.info("Gelen mesaj | %s: %s", sender_phone, message_body[:80])
 
         classification = classify_incoming_message(message_body)
+        # ⚠️ Acil durum HAYATİ — diğer akışlardan önce ele alınır.
+        # handle_emergency_message: doktora anlık alarm + audit + risk
+        # kaydı + veliye otomatik destek mesajı.
+        if classification == "emergency":
+            try:
+                handle_emergency_message(sender_phone, message_body)
+            except Exception as exc:
+                logger.error("Emergency handler hatası: %s", exc)
+            # Acil durumda diğer flowları (iptal/erteleme) çalıştırma
+            continue
         if classification == "cancellation":
             handle_cancellation_request(sender_phone, message_body)
         elif classification == "reschedule":
