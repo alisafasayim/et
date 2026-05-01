@@ -27,6 +27,13 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from http_retry import raise_for_retry, with_retry
+from notion_schema import (
+    get_database_ids,
+    has_separate_sessions_db,
+    is_extended,
+    patient_props,
+    session_props,
+)
 
 # ---------------------------------------------------------------------------
 # Sabitler
@@ -173,37 +180,83 @@ def create_patient_page(
 ) -> str:
     """
     Notion veritabanında yeni bir hasta sayfası oluşturur.
-    Veritabanının şu property'lere sahip olduğu varsayılır:
-      - 'Hasta Adı'  (title)
-      - 'Randevu Tarihi' (date)
-      - 'Randevu ID'  (rich_text)
-      - 'Durum'       (select)
+
+    Property isimleri NOTION_EXTENDED_SCHEMA env'ine göre seçilir:
+      - LEGACY: 'Hasta Adı', 'Randevu Tarihi', 'Randevu ID', 'Durum'
+      - EXTENDED: 'İsim', 'Durum' (+ opsiyonel ek alanlar Faz H'de)
+
+    EXTENDED modda Sessions DB ayrıysa randevu Sessions DB'sine
+    create_session_page() ile yazılır (bu fonksiyon değil çağrılır).
+
     Oluşturulan sayfanın page_id'sini döner.
     """
-    if not NOTION_DATABASE_ID:
-        raise EnvironmentError("NOTION_DATABASE_ID çevre değişkeni ayarlanmamış.")
+    db_ids = get_database_ids()
+    target_db = db_ids.patients or NOTION_DATABASE_ID
+    if not target_db:
+        raise EnvironmentError(
+            "NOTION_DATABASE_ID veya NOTION_PATIENTS_DB_ID set edilmemiş."
+        )
 
-    payload = {
-        "parent": {"database_id": NOTION_DATABASE_ID},
-        "properties": {
-            "Hasta Adı": {
-                "title": [{"text": {"content": patient_name}}]
-            },
-            "Randevu Tarihi": {
-                "date": {"start": appointment_date}
-            },
-            "Randevu ID": {
-                "rich_text": [{"text": {"content": appointment_id}}]
-            },
-            "Durum": {
-                "select": {"name": "Arşivlendi"}
-            },
-        },
+    p = patient_props()
+    properties: dict = {
+        p.title: {"title": [{"text": {"content": patient_name}}]},
+        p.status: {"select": {"name": "Arşivlendi"}},
     }
+    # Legacy modda randevu metadata'sı hasta sayfasının kendisinde
+    # tutulur (extended modda Sessions DB'ye yazılır).
+    if not is_extended():
+        properties[p.appointment_date] = {"date": {"start": appointment_date}}
+        properties[p.appointment_id] = {
+            "rich_text": [{"text": {"content": appointment_id}}]
+        }
 
+    payload = {"parent": {"database_id": target_db}, "properties": properties}
     result = _notion_post("/pages", payload)
     page_id = result["id"]
     print(f"  Notion sayfası oluşturuldu: {patient_name} → {page_id}")
+    return page_id
+
+
+def create_session_page(
+    patient_page_id: str,
+    patient_name: str,
+    session_date: str,
+    diagnosis: str = "",
+) -> str:
+    """
+    EXTENDED schema'da Sessions DB'sine yeni seans satırı ekler.
+
+    Hasta DB'sine relation kurar (Hastalar DB'sindeki hastayla bağlantılı).
+    Geriye seans page_id'si döner (SOAP notları bu sayfaya block olarak basılır).
+
+    EXTENDED schema kapalıysa veya Sessions DB yoksa ValueError fırlatır.
+    """
+    if not has_separate_sessions_db():
+        raise ValueError(
+            "Sessions DB yapılandırılmamış. NOTION_EXTENDED_SCHEMA=true ve "
+            "NOTION_SESSIONS_DB_ID set edilmeli."
+        )
+
+    db_ids = get_database_ids()
+    s = session_props()
+    properties: dict = {
+        s.title: {
+            "title": [
+                {"text": {"content": f"Seans - {session_date} - {patient_name}"}}
+            ]
+        },
+        s.patient_relation: {"relation": [{"id": patient_page_id}]},
+        s.date: {"date": {"start": session_date}},
+    }
+    if diagnosis and s.diagnosis:
+        properties[s.diagnosis] = {
+            "rich_text": [{"text": {"content": diagnosis[:2000]}}]
+        }
+
+    payload = {"parent": {"database_id": db_ids.sessions}, "properties": properties}
+    result = _notion_post("/pages", payload)
+    page_id = result["id"]
+    print(f"  Seans sayfası oluşturuldu: {patient_name} {session_date} → {page_id}")
     return page_id
 
 
@@ -213,39 +266,50 @@ def create_patient_page(
 
 def find_patient_root_page(patient_name: str) -> str | None:
     """
-    Hasta için kök sayfa (DB satırı) zaten var mı? Adı tam eşleşene
-    göre arar. Bulursa page_id döner; bulamazsa None.
+    Hasta için kök sayfa (DB satırı) zaten var mı? Title property
+    schema mod'una göre değişir ('Hasta Adı' vs 'İsim').
+    Bulursa page_id döner; bulamazsa None.
     """
-    if not NOTION_DATABASE_ID:
-        raise EnvironmentError("NOTION_DATABASE_ID çevre değişkeni ayarlanmamış.")
+    db_ids = get_database_ids()
+    target_db = db_ids.patients or NOTION_DATABASE_ID
+    if not target_db:
+        raise EnvironmentError(
+            "NOTION_DATABASE_ID veya NOTION_PATIENTS_DB_ID set edilmemiş."
+        )
 
+    p = patient_props()
     payload = {
         "filter": {
-            "property": "Hasta Adı",
+            "property": p.title,
             "title": {"equals": patient_name},
         },
         "page_size": 1,
     }
-    result = _notion_post(f"/databases/{NOTION_DATABASE_ID}/query", payload)
+    result = _notion_post(f"/databases/{target_db}/query", payload)
     pages = result.get("results", [])
     return pages[0]["id"] if pages else None
 
 
 def create_patient_root_page(patient_name: str) -> str:
     """
-    Hasta için kök DB satırı oluşturur. Sadece "Hasta Adı" (title)
-    property'si zorunlu; ek property'ler (telefon, TC, vs.) kullanıcı
-    DB'de tanımlamışsa manuel doldurulur — bu fonksiyon basit tutar.
-    """
-    if not NOTION_DATABASE_ID:
-        raise EnvironmentError("NOTION_DATABASE_ID çevre değişkeni ayarlanmamış.")
+    Hasta için kök DB satırı oluşturur. Sadece title property'si
+    zorunlu; ek property'ler (telefon, TC, vs.) kullanıcı DB'de
+    tanımlamışsa manuel doldurulur — bu fonksiyon basit tutar.
 
+    Schema mod'una göre title 'Hasta Adı' veya 'İsim' olur.
+    """
+    db_ids = get_database_ids()
+    target_db = db_ids.patients or NOTION_DATABASE_ID
+    if not target_db:
+        raise EnvironmentError(
+            "NOTION_DATABASE_ID veya NOTION_PATIENTS_DB_ID set edilmemiş."
+        )
+
+    p = patient_props()
     payload = {
-        "parent": {"database_id": NOTION_DATABASE_ID},
+        "parent": {"database_id": target_db},
         "properties": {
-            "Hasta Adı": {
-                "title": [{"text": {"content": patient_name}}]
-            },
+            p.title: {"title": [{"text": {"content": patient_name}}]},
         },
     }
     result = _notion_post("/pages", payload)
@@ -739,9 +803,59 @@ def archive_patient_session(
     if all_form_responses:
         form_response = match_form_response_to_patient(all_form_responses, patient_name)
 
+    # Extended schema + Sessions DB varsa Sessions DB'sine yeni satır
+    # aç ve SOAP'ı oraya yaz (hasta sayfasına block koyma — schema farklı).
+    if has_separate_sessions_db():
+        return _archive_extended(soap_note, form_response)
     if NOTION_HIERARCHICAL_MODE:
         return _archive_hierarchical(soap_note, form_response)
     return _archive_flat(soap_note, form_response)
+
+
+def _archive_extended(soap_note: dict, form_response: dict | None) -> str:
+    """
+    EXTENDED schema arşivleme: hasta Hastalar DB'sinde tek satır,
+    her seans Sessions DB'sinde ayrı satır + Hastalar relation.
+
+    SOAP block'ları seans sayfasına basılır. KVKK hibrit modda
+    Notion'a sadece pseudonym yazılır (gerçek isim/TCKN yerel
+    patient_registry'de şifreli kalır).
+
+    Anamnez form yanıtı EXTENDED schema'da Form Responses DB'sine
+    aittir — bu fonksiyon onu seans sayfasına block olarak basıp
+    geçer; ayrı Forms DB'ye yazma Faz H/sonra eklenir.
+    """
+    patient_name = soap_note.get("patient_name", "Bilinmeyen Hasta")
+
+    # _resolve_patient_root mevcut KVKK + registry mantığını kapsar
+    patient_root_id, display_name = _resolve_patient_root(patient_name)
+
+    # Seans tarihi: SOAP'ın gerçek randevu zamanı (M1 timezone fix
+    # sonrası güvenilir) veya generated_at fallback
+    session_date = _resolve_appointment_date(soap_note)
+
+    diagnosis = (
+        soap_note.get("soap", {})
+        .get("assessment", {})
+        .get("provisional_diagnosis", "")
+    )
+
+    # Sessions DB'de yeni satır + relation
+    session_page_id = create_session_page(
+        patient_page_id=patient_root_id,
+        patient_name=display_name,
+        session_date=session_date,
+        diagnosis=diagnosis,
+    )
+
+    # SOAP block'larını seans sayfasına bas
+    append_soap_to_page(session_page_id, soap_note)
+
+    # Anamnez varsa ayrıca seans sayfasına ekle (kompakt görünüm)
+    if form_response:
+        append_anamnesis_to_page(session_page_id, form_response)
+
+    return session_page_id
 
 
 def archive_all_soap_files(
