@@ -3,6 +3,39 @@
 {% block content %}
 <h1>Dashboard</h1>
 
+{% if stats %}
+<div class="card" style="margin-bottom: 16px;">
+  <h2 style="margin-top: 0;">📊 İş Hacmi</h2>
+  <div class="grid cols-4" style="gap: 12px;">
+    <div>
+      <div class="stat-label">Bugün Hasta</div>
+      <p class="stat" style="margin: 4px 0; font-size: 28px;">{{ stats.patients_today }}</p>
+      <small class="muted">Bu hafta: {{ stats.patients_this_week }} · Bu ay: {{ stats.patients_this_month }}</small>
+    </div>
+    <div>
+      <div class="stat-label">Toplam Hasta</div>
+      <p class="stat" style="margin: 4px 0; font-size: 28px;">{{ stats.patients_total }}</p>
+      <small class="muted">Aktif rıza: {{ stats.consents_active }}</small>
+    </div>
+    <div>
+      <div class="stat-label">Bugün e-SMM</div>
+      <p class="stat" style="margin: 4px 0; font-size: 28px;">{{ stats.esmm_today }}</p>
+      <small class="muted">Bu hafta: {{ stats.esmm_this_week }} · Bu ay: {{ stats.esmm_this_month }}</small>
+    </div>
+    <div>
+      <div class="stat-label">Bugün Erişim</div>
+      <p class="stat" style="margin: 4px 0; font-size: 28px;">{{ stats.audit_events_today }}</p>
+      <small class="muted">Toplam denetim: {{ stats.audit_events_total }}</small>
+    </div>
+  </div>
+  {% if stats.last_patient_at %}
+  <p class="muted" style="margin-top: 12px; margin-bottom: 0; font-size: 12px;">
+    Son hasta kaydı: <code>{{ stats.last_patient_at[:19] }}</code> UTC
+  </p>
+  {% endif %}
+</div>
+{% endif %}
+
 <div class="grid cols-3">
   <div class="card">
     <div class="stat-label">WhatsApp</div>

@@ -234,11 +234,20 @@ def dashboard():
     except Exception:
         recent_audit = []
 
+    # İş hacmi istatistikleri (yerel SQLite, hızlı sorgu)
+    try:
+        from dashboard_stats import compute_summary
+        stats = compute_summary()
+    except Exception as exc:
+        logger.warning("Dashboard stats hesaplanamadı: %s", exc)
+        stats = None
+
     return render_template(
         "admin/dashboard.html",
         health=health,
         namespace_counts=ns_counts,
         recent_audit=recent_audit,
+        stats=stats,
         csrf_token=_csrf_token(),
     )
 
