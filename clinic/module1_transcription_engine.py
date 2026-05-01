@@ -364,6 +364,13 @@ RANDEVU: {appointment_summary}
 TRANSKRİPT:
 {transcript}
 
+KULLANILABİLİR DSM-5-TR TANI KODLARI (sık kullanılanlar):
+{dsm5_codes_hint}
+
+Tanı önerirken yukarıdaki kod listesinden en uygun olanları seç ve
+"dsm5_suggested_codes" alanına en fazla 3 tane ekle (örn: "F90.0").
+Liste dışında bir kod uydurma; uygun kod yoksa boş dizi bırak.
+
 Yanıtını SADECE aşağıdaki JSON formatında ver:
 {{
   "patient_name": "{patient_name}",
@@ -381,9 +388,10 @@ Yanıtını SADECE aşağıdaki JSON formatında ver:
       "affect_mood": "<Duygudurum ve afekt>"
     }},
     "assessment": {{
-      "provisional_diagnosis": "<Ön tanı>",
+      "provisional_diagnosis": "<Ön tanı (Türkçe)>",
       "differential_diagnosis": "<Ayırıcı tanı>",
-      "risk_assessment": "<Risk değerlendirmesi>"
+      "risk_assessment": "<Risk değerlendirmesi>",
+      "dsm5_suggested_codes": ["<F-kodu>", "..."]
     }},
     "plan": {{
       "medication": "<İlaç tedavisi (varsa)>",
@@ -395,6 +403,29 @@ Yanıtını SADECE aşağıdaki JSON formatında ver:
   }},
   "generated_at": "{generated_at}"
 }}"""
+
+
+def _dsm5_codes_hint() -> str:
+    """SOAP prompt'una eklenen DSM-5 kod listesini döner.
+
+    Tüm 38 kodu basmak prompt token'ını şişirir; en sık karşılaşılan
+    çocuk-ergen tanılarından kategori başlıkları ile özetlenmiş liste.
+    """
+    try:
+        from dsm5_codes import DSM5_CODES
+    except ImportError:
+        return "(DSM-5 modülü yüklü değil)"
+
+    by_cat: dict[str, list[str]] = {}
+    for diag in DSM5_CODES.values():
+        by_cat.setdefault(diag.category, []).append(f"{diag.code} = {diag.name_tr}")
+
+    lines = []
+    for cat, items in sorted(by_cat.items()):
+        lines.append(f"- {cat}:")
+        for item in items:
+            lines.append(f"    {item}")
+    return "\n".join(lines)
 
 
 def generate_soap_note(
@@ -419,6 +450,7 @@ def generate_soap_note(
         appointment_summary=appointment_summary,
         transcript=transcript_segment,
         generated_at=generated_at,
+        dsm5_codes_hint=_dsm5_codes_hint(),
     )
 
     response = ollama.chat(
