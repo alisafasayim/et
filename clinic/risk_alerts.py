@@ -6,15 +6,19 @@ taranıp kritik anahtar kelime bulunursa doktora anında bildirim gider.
 LLM çıktısının doğruluğuna güvenilemez (hayati riskli), bu yüzden
 deterministik regex tabanlı taraması yapılır.
 
-Severity:
-  - critical: aktif intihar/zarar niyeti veya plan
-  - high    : pasif intihar düşüncesi, ölüm fikri
+4-Seviye Risk (clinic_automation 4-tier yapısından port):
+  - critical: aktif intihar/zarar niyeti veya plan (anlık alarm)
+  - high    : pasif intihar düşüncesi, ölüm fikri (24h içinde dönüş)
+  - medium  : yoğun kaygı/depresyon, eski intihar düşüncesi (haftalık takip)
+  - low     : uyku bozukluğu, dikkat dağınıklığı (rutin takip)
   - none    : risk içeren ifade tespit edilmedi
 """
 
 import logging
 import os
 import re
+from datetime import datetime, timezone
+from enum import Enum
 from typing import Optional
 
 from state_store import get_default_store
@@ -22,6 +26,73 @@ from state_store import get_default_store
 logger = logging.getLogger("risk_alerts")
 
 DOCTOR_PHONE = os.getenv("DOCTOR_PHONE", "")
+
+
+# ---------------------------------------------------------------------------
+# Risk seviyesi enum (clinic_automation 4-tier port)
+# ---------------------------------------------------------------------------
+
+class RiskLevel(str, Enum):
+    """4-seviye klinik risk değerlendirmesi.
+
+    str'den miras alıyor — eski 'critical'/'high'/'none' string'leriyle
+    geriye uyumlu (e.value == "critical"). Existing detect_risk()
+    fonksiyonu string döndürmeye devam eder; yeni kod RiskLevel kullanır.
+    """
+    NONE = "none"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+    @property
+    def severity_order(self) -> int:
+        """Sıralama için: yüksek değer = daha kritik."""
+        return {
+            RiskLevel.NONE: 0,
+            RiskLevel.LOW: 1,
+            RiskLevel.MEDIUM: 2,
+            RiskLevel.HIGH: 3,
+            RiskLevel.CRITICAL: 4,
+        }[self]
+
+    @classmethod
+    def from_string(cls, value: str) -> "RiskLevel":
+        """String'den RiskLevel oluştur (case-insensitive)."""
+        for level in cls:
+            if level.value == (value or "").lower():
+                return level
+        return cls.NONE
+
+
+# Orta-seviye (MEDIUM) anahtar kelime kalıpları — yoğun kaygı,
+# depresyon, geçmiş intihar düşüncesi (artık aktif değil)
+MEDIUM_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in [
+        r"yoğun\s*kayg",
+        r"a[ğg]ır\s*depres",
+        r"panik\s*atak",
+        r"travma\s*sonrası",
+        r"eski(den)?\s*intihar",
+        r"ge[çc]mişte\s*kendine\s*zarar",
+        r"umutsuzluk",
+        r"de[ğg]ersizlik\s*duygu",
+    ]
+]
+
+# Hafif-seviye (LOW) — anormal ama acil değil
+LOW_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in [
+        r"uyku(suzluk|\s*bozuklu)",
+        r"dikkat\s*da[ğg]ın",
+        r"sosyal\s*[çc]ekilme",
+        r"i[şs]tah(sızlık|\s*kayb)",
+        r"motivasyon\s*kayb",
+        r"endi[şs]e",
+    ]
+]
 
 # ---------------------------------------------------------------------------
 # Anahtar kelime kalıpları
@@ -72,7 +143,12 @@ HIGH_PATTERNS = [
 # ---------------------------------------------------------------------------
 
 def _scan_text(text: str) -> tuple[str, list[str]]:
-    """Verilen metni tarar, en yüksek severity ve eşleşen kalıpları döner."""
+    """Verilen metni tarar, en yüksek severity ve eşleşen kalıpları döner.
+
+    4-seviye sıralama: critical > high > medium > low > none.
+    Daha önce 2-seviye (critical/high/none) idi; geriye uyumlu — string
+    değerleri aynı, sadece medium/low eklendi.
+    """
     if not text:
         return "none", []
 
@@ -84,7 +160,57 @@ def _scan_text(text: str) -> tuple[str, list[str]]:
     if matched_high:
         return "high", matched_high
 
+    matched_medium = [p.pattern for p in MEDIUM_PATTERNS if p.search(text)]
+    if matched_medium:
+        return "medium", matched_medium
+
+    matched_low = [p.pattern for p in LOW_PATTERNS if p.search(text)]
+    if matched_low:
+        return "low", matched_low
+
     return "none", []
+
+
+def record_risk_event(
+    level: "RiskLevel | str",
+    source: str,
+    summary: str,
+    sender_phone: str = "",
+    patient_name: str = "",
+    details: Optional[dict] = None,
+) -> dict:
+    """
+    Risk olayını state_store'a kayıt eder (faz F emergency'den çağrılır).
+
+    state_store namespace='risk_events', key=auto-incremented timestamp.
+    İlerideki dashboard widget'ı bu olayları okur.
+
+    Source örnekler: 'whatsapp', 'soap_assessment', 'manual'.
+    """
+    if isinstance(level, str):
+        level = RiskLevel.from_string(level)
+
+    record = {
+        "level": level.value,
+        "source": source,
+        "summary": summary[:300],
+        "sender_phone": sender_phone,
+        "patient_name": patient_name,
+        "recorded_at": datetime.now(tz=timezone.utc).isoformat(),
+        "details": details or {},
+    }
+    try:
+        store = get_default_store()
+        # Her event ayrı kayıt olsun — key olarak timestamp + source
+        key = f"{record['recorded_at']}:{source}"
+        store.claim("risk_events", key, meta=record)
+        logger.warning(
+            "Risk event kaydedildi | level=%s | source=%s | %s",
+            level.value, source, summary[:100],
+        )
+    except Exception as exc:
+        logger.error("Risk event state_store'a yazılamadı: %s", exc)
+    return record
 
 
 def detect_risk(soap_note: dict) -> dict:
@@ -111,17 +237,20 @@ def detect_risk(soap_note: dict) -> dict:
     matched: list[str] = []
     snippets: list[dict] = []
 
+    # 4-seviye sıralama: critical > high > medium > low > none
+    severity_order = ["none", "low", "medium", "high", "critical"]
+    overall_idx = 0
+
     for path, text in candidates:
         level, patterns = _scan_text(text)
         if level == "none":
             continue
         snippets.append({"path": path, "level": level, "text": text[:200]})
         matched.extend(patterns)
-        # critical > high > none
-        if level == "critical":
-            overall_level = "critical"
-        elif level == "high" and overall_level != "critical":
-            overall_level = "high"
+        idx = severity_order.index(level)
+        if idx > overall_idx:
+            overall_idx = idx
+            overall_level = level
 
     return {
         "level": overall_level,
