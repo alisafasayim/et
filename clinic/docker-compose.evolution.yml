@@ -3,66 +3,90 @@
 # KVKK güvencesi:
 # - Tüm hasta WhatsApp mesajları sizin Docker container'ınızdan geçer
 # - 3. partiye (Twilio, Meta) sadece WhatsApp protokol katmanında transit
-# - Mesaj içeriği yerel disk'te şifresiz tutulur (volume bind)
-#   → KVKK m.6 için disk şifrelemesi şart (LUKS/BitLocker veya systemd-cryptsetup)
+# - Mesajlar yerel postgres + bind mount volume'larda saklanır
+#   → KVKK m.6 için disk şifrelemesi ŞART (BitLocker / LUKS / FileVault)
+#
+# Mimari:
+#   evolution (8080) → postgres (5432) [iç network'te]
+#   ./evolution_data/   ← instance auth, sessions
+#   ./postgres_data/    ← messages, contacts, chats
 #
 # Kullanım:
 #   docker compose -f docker-compose.evolution.yml up -d
-#   # QR taratma:
-#   open http://localhost:8080/manager
-#   # → Login: ${AUTHENTICATION_API_KEY}
-#   # → Instance: clinic → QR Code → telefondan WhatsApp web bağla
+#   open http://localhost:8080/manager  → Login: $EVOLUTION_API_KEY
+#   → New Instance → QR Code → telefondan WhatsApp Web QR'ini tara
 
 services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: clinic-evolution-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=evolution
+      - POSTGRES_PASSWORD=${EVOLUTION_DB_PASSWORD:-evolution_local_only}
+      - POSTGRES_DB=evolution
+      - TZ=Europe/Istanbul
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "evolution"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   evolution:
     image: atendai/evolution-api:latest
     container_name: clinic-evolution
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
-      # Auth — generate_secrets.py ile üretilen WEBHOOK_SECRET kullanılabilir
+      # Auth
       - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:?EVOLUTION_API_KEY required}
       - SERVER_URL=${WEBHOOK_PUBLIC_URL:-http://localhost:8080}
 
-      # Bellek modu (DB yok, hızlı başlangıç). Üretimde Postgres öner.
-      - DATABASE_ENABLED=false
-      - REDIS_ENABLED=false
+      # Postgres (compose içi network: postgres:5432)
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution:${EVOLUTION_DB_PASSWORD:-evolution_local_only}@postgres:5432/evolution?schema=public
+      - DATABASE_CONNECTION_CLIENT_NAME=clinic
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=true
+      - DATABASE_SAVE_MESSAGE_UPDATE=true
+      - DATABASE_SAVE_DATA_CONTACTS=true
+      - DATABASE_SAVE_DATA_CHATS=true
+      - DATABASE_SAVE_DATA_HISTORIC=true
+
+      # Cache: lokal bellek (Redis container gereksiz demo için)
+      - CACHE_REDIS_ENABLED=false
+      - CACHE_LOCAL_ENABLED=true
 
       # Webhook — clinic'in /webhook/whatsapp endpoint'ine bağlanır.
-      #
-      # NOT: Container içinden "localhost" KENDİNİ gösterir, clinic'i değil!
-      # Bu yüzden EVOLUTION_WEBHOOK_TARGET_URL kullanıyoruz:
-      #   - Dev (Docker Desktop, Win/Mac): http://host.docker.internal:5055
-      #     (Docker Desktop bu DNS'i otomatik sağlar)
-      #   - Prod (public URL): https://klinik.example.com
-      #
-      # Set edilmemişse: Docker Desktop varsayılanı kullanılır.
+      # Container içinden "localhost" = container'ın kendisi → host.docker.internal
+      # Docker Desktop bu DNS'i Win/Mac'te otomatik sağlar.
       - WEBHOOK_GLOBAL_URL=${EVOLUTION_WEBHOOK_TARGET_URL:-http://host.docker.internal:5055}/webhook/whatsapp
       - WEBHOOK_GLOBAL_ENABLED=true
       - WEBHOOK_EVENTS_MESSAGES_UPSERT=true
       - WEBHOOK_EVENTS_CONNECTION_UPDATE=true
 
-    # Linux'ta host.docker.internal otomatik gelmez; tüm platformlar için ekle
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-      # KVKK için: log seviyesi düşük (PII içerebilir)
+      # KVKK: log seviyesi düşük (PII içerebilir)
       - LOG_LEVEL=ERROR
       - LOG_COLOR=false
 
       # Türkiye saat dilimi
       - TZ=Europe/Istanbul
 
-      # WhatsApp Web sürümü (dolar işareti escape: $$ = $)
+      # WhatsApp Web sürümü
       - CONFIG_SESSION_PHONE_CLIENT=Klinik
       - CONFIG_SESSION_PHONE_NAME=Chrome
 
-      # WhatsApp web yeniden bağlanma (instance koparsa otomatik QR)
+      # Instance koparsa otomatik QR
       - QRCODE_LIMIT=30
 
     volumes:
-      # Instance verisi (auth state, vs.) — KVKK için disk şifreleme şart
+      # Instance verisi (auth state) — KVKK için disk şifreleme şart
       - ./evolution_data:/evolution/instances
       - ./evolution_data/logs:/evolution/logs
 
@@ -72,5 +96,6 @@ services:
       timeout: 10s
       retries: 3
 
-# Veri kalıcılığı için named volume yerine bind mount kullanıyoruz
-# çünkü KVKK için disk şifrelemesini siz yönetiyorsunuz (./evolution_data/).
+# Bind mount kullanıyoruz (named volume değil) çünkü KVKK için disk
+# şifrelemesini siz yönetiyorsunuz (BitLocker üzerinden ./evolution_data,
+# ./postgres_data klasörleri).
