@@ -102,13 +102,25 @@ def test_notion() -> bool:
                 if r2.status_code == 200:
                     props = r2.json().get("properties", {})
                     ok(f"Hasta DB erişilebilir: {len(props)} property")
-                    needed = {"Hasta Adı", "Randevu Tarihi", "Randevu ID", "Durum"}
+                    # Schema mod'una göre beklenen property'ler
+                    extended = os.getenv(
+                        "NOTION_EXTENDED_SCHEMA", "false"
+                    ).lower() in ("1", "true", "yes", "on")
+                    if extended:
+                        needed = {"İsim", "Durum"}  # extended schema title+status
+                        schema_label = "extended"
+                    else:
+                        needed = {"Hasta Adı", "Randevu Tarihi", "Randevu ID", "Durum"}
+                        schema_label = "legacy"
                     missing = needed - set(props.keys())
                     if missing:
-                        fail(f"Eksik property: {', '.join(missing)}")
+                        fail(
+                            f"Eksik property ({schema_label}): {', '.join(missing)}. "
+                            f"Mevcut: {', '.join(sorted(props.keys()))}"
+                        )
                         return False
                     else:
-                        ok("Tüm gerekli property'ler mevcut")
+                        ok(f"Tüm gerekli {schema_label} property'leri mevcut")
                 else:
                     fail(f"DB erişimi başarısız: {r2.status_code} {r2.text[:80]}")
                     return False
