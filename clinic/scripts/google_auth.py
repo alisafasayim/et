@@ -51,9 +51,15 @@ if sys.platform == "win32":
 
 SCOPES_BY_SERVICE = {
     "calendar": ["https://www.googleapis.com/auth/calendar.readonly"],
-    "forms": ["https://www.googleapis.com/auth/forms.responses.readonly"],
+    "forms": [
+        # Form'un kendisini (soruları, başlığı) okumak için
+        "https://www.googleapis.com/auth/forms.body.readonly",
+        # Form'a gelen yanıtları (anamnez verisi) okumak için
+        "https://www.googleapis.com/auth/forms.responses.readonly",
+    ],
     "both": [
         "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/forms.body.readonly",
         "https://www.googleapis.com/auth/forms.responses.readonly",
     ],
 }

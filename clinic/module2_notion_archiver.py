@@ -68,8 +68,10 @@ GOOGLE_TOKEN_FILE = os.getenv(
     os.getenv("GOOGLE_TOKEN_FILE", "token.json"),
 )
 GOOGLE_FORMS_SCOPES = [
+    # Form metadata (sorular, başlık) — forms.get için zorunlu
+    "https://www.googleapis.com/auth/forms.body.readonly",
+    # Form yanıtları (anamnez verisi) — forms.responses.list için zorunlu
     "https://www.googleapis.com/auth/forms.responses.readonly",
-    "https://www.googleapis.com/auth/calendar.readonly",
 ]
 
 

@@ -139,18 +139,41 @@ def test_notion() -> bool:
 # Google Calendar
 # ---------------------------------------------------------------------------
 
-def _google_creds():
-    """OAuth credentials.json'dan service oluştur (token.json varsa kullan)."""
+def _google_creds(service: str = "both"):
+    """
+    OAuth credentials.json'dan service oluştur.
+
+    Servise göre token dosyası seçilir:
+      - 'calendar' → GOOGLE_CALENDAR_TOKEN_FILE (fallback: GOOGLE_TOKEN_FILE)
+      - 'forms'    → GOOGLE_FORMS_TOKEN_FILE (fallback: GOOGLE_TOKEN_FILE)
+      - 'both'     → GOOGLE_TOKEN_FILE (eski tek-token davranışı)
+    """
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
     from google.auth.transport.requests import Request
 
     creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-    token_file = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
-    scopes = [
-        "https://www.googleapis.com/auth/calendar.readonly",
-        "https://www.googleapis.com/auth/forms.responses.readonly",
-    ]
+    if service == "calendar":
+        token_file = os.getenv(
+            "GOOGLE_CALENDAR_TOKEN_FILE",
+            os.getenv("GOOGLE_TOKEN_FILE", "token.json"),
+        )
+        scopes = ["https://www.googleapis.com/auth/calendar.readonly"]
+    elif service == "forms":
+        token_file = os.getenv(
+            "GOOGLE_FORMS_TOKEN_FILE",
+            os.getenv("GOOGLE_TOKEN_FILE", "token.json"),
+        )
+        scopes = [
+            "https://www.googleapis.com/auth/forms.body.readonly",
+            "https://www.googleapis.com/auth/forms.responses.readonly",
+        ]
+    else:
+        token_file = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
+        scopes = [
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/forms.responses.readonly",
+        ]
 
     if not Path(creds_file).exists():
         return None, f"credentials.json bulunamadı: {creds_file}"
@@ -174,7 +197,7 @@ def _google_creds():
 
 def test_calendar() -> bool:
     header("Google Calendar", "calendars.get primary")
-    creds, err = _google_creds()
+    creds, err = _google_creds("calendar")
     if err:
         skip(err)
         return True
@@ -211,7 +234,7 @@ def test_forms() -> bool:
     if not form_id or form_id.startswith("1FAIpQLSxxx"):
         skip("GOOGLE_ANAMNESIS_FORM_ID boş; atlanıyor")
         return True
-    creds, err = _google_creds()
+    creds, err = _google_creds("forms")
     if err:
         skip(err)
         return True
