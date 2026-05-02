@@ -258,6 +258,17 @@ def _calendar_poll_loop():
         time.sleep(CALENDAR_POLL_INTERVAL_SEC)
 
 
+def _within_active_hours(start_hour: int, end_hour: int) -> bool:
+    """
+    Şu an local saatte [start_hour, end_hour) penceresinde mi?
+
+    Örn: start=9, end=21 → sabah 9 dahil, akşam 21 hariç (yani 9:00-20:59).
+    Form yanıtları gibi yoğun pencerede sync'i sınırlandırmak için.
+    """
+    now_hour = datetime.now().hour
+    return start_hour <= now_hour < end_hour
+
+
 def _calendar_sync_loop():
     """
     Calendar randevularını Notion'a periyodik senkronize eder.
@@ -304,6 +315,93 @@ def _calendar_sync_loop():
                 )
         except Exception as exc:
             logger.error("[CalendarSync] Loop hatası: %s", exc)
+        time.sleep(interval)
+
+
+def _forms_sync_loop():
+    """
+    Form yanıtlarını (anamnez) Notion'a hızlı senkronize eder.
+
+    Aileler bazen randevudan dakikalar önce form doldurur; o yüzden
+    aktif çalışma saatlerinde (09:00-21:00 default) **1 dakikada bir**
+    tarar. Pasif saatlerde uyku → gereksiz API/log yükü yok.
+
+    Sabah 09:00'da gece dolan formlar 1 dk içinde Notion'a düşer.
+
+    Idempotent: state_store 'form_sync' namespace + response_id.
+    Notion API rate limit (3 req/sec, 259K req/gün) çok geniş — günde
+    ~7K req atıyoruz, limitin %2.7'si.
+
+    Env ayarları:
+        FORMS_SYNC_INTERVAL_SEC=60        (aktif saatlerde periyot)
+        FORMS_SYNC_IDLE_SLEEP_SEC=300     (pasif saatlerde uyku)
+        FORMS_SYNC_ACTIVE_HOUR_START=9
+        FORMS_SYNC_ACTIVE_HOUR_END=21
+    """
+    interval = int(os.getenv("FORMS_SYNC_INTERVAL_SEC", "60"))
+    idle_sleep = int(os.getenv("FORMS_SYNC_IDLE_SLEEP_SEC", "300"))
+    start_h = int(os.getenv("FORMS_SYNC_ACTIVE_HOUR_START", "9"))
+    end_h = int(os.getenv("FORMS_SYNC_ACTIVE_HOUR_END", "21"))
+
+    logger.info(
+        "[FormsSync] Başlatıldı | aktif: %02d:00-%02d:00 | aktif aralık: %ds | pasif uyku: %ds",
+        start_h, end_h, interval, idle_sleep,
+    )
+
+    while True:
+        if not _within_active_hours(start_h, end_h):
+            time.sleep(idle_sleep)
+            continue
+
+        try:
+            from scripts.sync_forms_to_notion import (
+                _resolve_form_ids,
+                get_forms_service,
+                sync_response_to_notion,
+            )
+            from module2_notion_archiver import fetch_form_responses
+
+            form_ids = _resolve_form_ids(None)
+            if not form_ids:
+                logger.warning("[FormsSync] Form ID bulunamadı, sync atlandı")
+                time.sleep(idle_sleep)
+                continue
+
+            service = get_forms_service()
+            synced = skipped = failed = 0
+
+            for form_id in form_ids:
+                try:
+                    form_meta = service.forms().get(formId=form_id).execute()
+                    title = form_meta.get("info", {}).get("title", form_id[:8])
+                    responses = fetch_form_responses(service, form_id)
+                except Exception as exc:
+                    logger.error("[FormsSync] Form %s çekilemedi: %s", form_id[:8], exc)
+                    failed += 1
+                    continue
+
+                for resp in responses:
+                    try:
+                        r = sync_response_to_notion(resp, title, dry_run=False)
+                        if r["status"] == "synced":
+                            synced += 1
+                        elif r["status"] == "skipped":
+                            skipped += 1
+                    except Exception as exc:
+                        failed += 1
+                        logger.error(
+                            "[FormsSync] Yanıt sync hatası %s: %s",
+                            resp.get("response_id"), exc,
+                        )
+
+            if synced or failed:
+                logger.info(
+                    "[FormsSync] %d yeni anamnez, %d skip, %d hata",
+                    synced, skipped, failed,
+                )
+        except Exception as exc:
+            logger.error("[FormsSync] Loop hatası: %s", exc)
+
         time.sleep(interval)
 
 
@@ -511,6 +609,7 @@ def start_clinic_system():
         "AudioLoop": _audio_inbox_loop,
         "CalendarLoop": _calendar_poll_loop,
         "CalendarSync": _calendar_sync_loop,
+        "FormsSync": _forms_sync_loop,
         "CalendarWatch": _calendar_watch_loop,
         "Reminder24h": _reminder_24h_loop,
         "Reminder1h": _reminder_1h_loop,

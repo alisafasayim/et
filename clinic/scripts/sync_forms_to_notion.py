@@ -55,11 +55,17 @@ logger = logging.getLogger("forms_sync")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
-# Hasta adı içerebilecek soru başlığı kalıpları (sırayla aranır)
+# Hasta adı içerebilecek soru başlığı kalıpları (sırayla aranır,
+# küçük harfe çevrilmiş halleriyle eşleşir)
 NAME_QUESTION_PATTERNS = [
-    "ad soyad", "adınız", "adiniz", "isminiz", "hasta adı", "hasta adi",
-    "çocuğun adı", "cocugun adi", "çocuğunuzun", "cocugunuzun",
+    # En spesifik (form yapısı: "Çocuğunuzun: / Adı Soyadı")
+    "adı soyadı", "adi soyadi", "ad soyad",
+    # Diğer yaygın varyasyonlar
+    "adınız", "adiniz", "isminiz", "hasta adı", "hasta adi",
+    "çocuğun adı", "cocugun adi", "çocuğunuzun adı", "cocugunuzun adi",
+    "çocuğunuzun", "cocugunuzun",
     "ergenin adı", "ergenin adi",
+    "danışanın adı", "danisanin adi",
 ]
 
 
