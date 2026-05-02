@@ -60,7 +60,13 @@ KVKK_HYBRID_MODE = os.getenv(
 ).lower() in ("1", "true", "yes", "on")
 
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-GOOGLE_TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
+# Forms farklı bir Google hesabında olabilir (Calendar başka hesapta).
+# GOOGLE_FORMS_TOKEN_FILE tanımlanmışsa o kullanılır, yoksa eski
+# GOOGLE_TOKEN_FILE'a düşer (geriye uyum).
+GOOGLE_TOKEN_FILE = os.getenv(
+    "GOOGLE_FORMS_TOKEN_FILE",
+    os.getenv("GOOGLE_TOKEN_FILE", "token.json"),
+)
 GOOGLE_FORMS_SCOPES = [
     "https://www.googleapis.com/auth/forms.responses.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",

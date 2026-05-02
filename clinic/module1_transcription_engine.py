@@ -35,7 +35,13 @@ from tinytag import TinyTag
 
 AUDIO_INBOX_DIR = Path(os.getenv("AUDIO_INBOX_DIR", "./audio_inbox"))
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-GOOGLE_TOKEN_FILE = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
+# Calendar ve Forms farklı Google hesaplarında olabilir. Her servis
+# için ayrı token dosyası tanımlanabilir; tanımlanmamışsa eski tek-
+# token davranışına düşer (geriye uyum).
+GOOGLE_TOKEN_FILE = os.getenv(
+    "GOOGLE_CALENDAR_TOKEN_FILE",
+    os.getenv("GOOGLE_TOKEN_FILE", "token.json"),
+)
 GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "large-v3")
