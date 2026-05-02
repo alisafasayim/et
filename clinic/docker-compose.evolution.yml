@@ -29,11 +29,23 @@ services:
       - DATABASE_ENABLED=false
       - REDIS_ENABLED=false
 
-      # Webhook — clinic'in /webhook/whatsapp endpoint'ine bağlanır
-      - WEBHOOK_GLOBAL_URL=${WEBHOOK_PUBLIC_URL}/webhook/whatsapp
+      # Webhook — clinic'in /webhook/whatsapp endpoint'ine bağlanır.
+      #
+      # NOT: Container içinden "localhost" KENDİNİ gösterir, clinic'i değil!
+      # Bu yüzden EVOLUTION_WEBHOOK_TARGET_URL kullanıyoruz:
+      #   - Dev (Docker Desktop, Win/Mac): http://host.docker.internal:5055
+      #     (Docker Desktop bu DNS'i otomatik sağlar)
+      #   - Prod (public URL): https://klinik.example.com
+      #
+      # Set edilmemişse: Docker Desktop varsayılanı kullanılır.
+      - WEBHOOK_GLOBAL_URL=${EVOLUTION_WEBHOOK_TARGET_URL:-http://host.docker.internal:5055}/webhook/whatsapp
       - WEBHOOK_GLOBAL_ENABLED=true
       - WEBHOOK_EVENTS_MESSAGES_UPSERT=true
       - WEBHOOK_EVENTS_CONNECTION_UPDATE=true
+
+    # Linux'ta host.docker.internal otomatik gelmez; tüm platformlar için ekle
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
       # KVKK için: log seviyesi düşük (PII içerebilir)
       - LOG_LEVEL=ERROR
