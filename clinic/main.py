@@ -258,6 +258,55 @@ def _calendar_poll_loop():
         time.sleep(CALENDAR_POLL_INTERVAL_SEC)
 
 
+def _calendar_sync_loop():
+    """
+    Calendar randevularını Notion'a periyodik senkronize eder.
+
+    Her event için Hastalar DB sayfası + Konsültasyonlar DB seans satırı
+    açar. Pseudonym ile (KVKK hibrit). Idempotent: state_store
+    'calendar_sync' namespace'i ile aynı event ikinci kez işlenmez.
+
+    Periyot: CALENDAR_SYNC_INTERVAL_SEC (varsayılan 1800 = 30 dk).
+    """
+    interval = int(os.getenv("CALENDAR_SYNC_INTERVAL_SEC", "1800"))
+    days = int(os.getenv("CALENDAR_SYNC_DAYS_AHEAD", "14"))
+    logger.info(
+        "[CalendarSync] Başlatıldı | aralık: %ds | yaklaşan: %d gün",
+        interval, days,
+    )
+    while True:
+        try:
+            from scripts.sync_calendar_to_notion import (
+                fetch_upcoming_events,
+                get_calendar_service,
+                sync_event_to_notion,
+            )
+            service = get_calendar_service()
+            events = fetch_upcoming_events(service, days=days)
+            synced = skipped = failed = 0
+            for ev in events:
+                try:
+                    r = sync_event_to_notion(ev, dry_run=False)
+                    if r["status"] == "synced":
+                        synced += 1
+                    elif r["status"] == "skipped":
+                        skipped += 1
+                except Exception as exc:
+                    failed += 1
+                    logger.error(
+                        "[CalendarSync] Event sync hatası %s: %s",
+                        ev.get("id"), exc,
+                    )
+            if synced or failed:
+                logger.info(
+                    "[CalendarSync] %d yeni randevu senkronize, %d skip, %d hata",
+                    synced, skipped, failed,
+                )
+        except Exception as exc:
+            logger.error("[CalendarSync] Loop hatası: %s", exc)
+        time.sleep(interval)
+
+
 def _reminder_loop(horizon: str, interval_sec: int):
     """
     Yaklaşan randevular için (24h veya 1h önce) hatırlatma cron'u.
@@ -461,6 +510,7 @@ def start_clinic_system():
     thread_specs: dict[str, Callable[[], None]] = {
         "AudioLoop": _audio_inbox_loop,
         "CalendarLoop": _calendar_poll_loop,
+        "CalendarSync": _calendar_sync_loop,
         "CalendarWatch": _calendar_watch_loop,
         "Reminder24h": _reminder_24h_loop,
         "Reminder1h": _reminder_1h_loop,
