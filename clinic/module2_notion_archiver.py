@@ -268,6 +268,69 @@ def create_session_page(
     return page_id
 
 
+def create_form_response_page(
+    patient_page_id: str,
+    patient_name: str,
+    submitted_at: str,
+    answers: dict[str, str] | None = None,
+) -> str:
+    """
+    EXTENDED schema'da Form Yanıtları (FormResponses) DB'sine
+    yeni anamnez satırı ekler ve hasta DB'sine relation kurar.
+
+    SOAP not sayfasına block-koyma yaklaşımının yanında bu DB
+    her formu ayrı bir kayıt olarak tutar — aramaya/raporlamaya
+    daha uygun (örn: 'son 30 günde 50 anamnez geldi').
+
+    'answers' verilmişse soru-cevapları sayfa içine block olarak
+    da basar (görüntüleme kolaylığı için).
+
+    Form Responses DB yoksa ValueError. Geriye page_id döner.
+    """
+    from notion_schema import form_response_props, get_database_ids
+
+    db_ids = get_database_ids()
+    if not (is_extended() and db_ids.form_responses):
+        raise ValueError(
+            "Form Responses DB yapılandırılmamış. NOTION_EXTENDED_SCHEMA=true "
+            "ve NOTION_FORM_RESPONSES_DB_ID set edilmeli."
+        )
+
+    f = form_response_props()
+    submitted_date = (submitted_at or "")[:10] or "1970-01-01"
+    properties: dict = {
+        f.title: {
+            "title": [{"text": {"content": f"Anamnez - {patient_name}"}}]
+        },
+        f.patient_relation: {"relation": [{"id": patient_page_id}]},
+        f.submitted_at: {"date": {"start": submitted_date}},
+    }
+    payload = {
+        "parent": {"database_id": db_ids.form_responses},
+        "properties": properties,
+    }
+    result = _notion_post("/pages", payload)
+    page_id = result["id"]
+
+    # Soru-cevap çiftlerini sayfa içine block olarak da bas
+    if answers:
+        blocks = [
+            _heading2("📋 Anamnez Yanıtları"),
+            _paragraph(f"Gönderilme: {submitted_at}"),
+            _divider(),
+        ]
+        for question, answer in answers.items():
+            blocks.append(_heading3(question))
+            blocks.append(_paragraph(answer or "—"))
+        _append_blocks(page_id, blocks)
+
+    print(
+        f"  Form yanıt sayfası oluşturuldu: {patient_name} "
+        f"{submitted_date} → {page_id}"
+    )
+    return page_id
+
+
 # ---------------------------------------------------------------------------
 # 3b. Hasta-seans hiyerarşik kayıt (NOTION_HIERARCHICAL_MODE=true)
 # ---------------------------------------------------------------------------
