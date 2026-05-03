@@ -273,17 +273,27 @@ def create_form_response_page(
     patient_name: str,
     submitted_at: str,
     answers: dict[str, str] | None = None,
+    include_clinical_blocks: bool = False,
 ) -> str:
     """
     EXTENDED schema'da Form Yanıtları (FormResponses) DB'sine
     yeni anamnez satırı ekler ve hasta DB'sine relation kurar.
 
-    SOAP not sayfasına block-koyma yaklaşımının yanında bu DB
-    her formu ayrı bir kayıt olarak tutar — aramaya/raporlamaya
-    daha uygun (örn: 'son 30 günde 50 anamnez geldi').
+    KVKK güvencesi (DEFAULT):
+    --------------------------
+    `answers` verilse bile içerik Notion sayfasına block olarak
+    YAZILMAZ. Sayfa sadece pseudonym + tarih + relation tutar.
 
-    'answers' verilmişse soru-cevapları sayfa içine block olarak
-    da basar (görüntüleme kolaylığı için).
+    Bunun nedeni: form yanıtları TC kimlik, ad-soyad, telefon,
+    anne-baba ad/meslek, okul/yuva, ev adresi gibi PII içerir.
+    KVKK m.6 (özel nitelikli sağlık verisi) yurtdışı transfer
+    (Notion=ABD-host) için açık rıza + Kurul izni gerektirir.
+
+    Klinik içeriği Notion'a yazmak isterseniz:
+    - `include_clinical_blocks=True` ver
+    - `answers` dict'i ÖNCE PII filtresi'nden geçirilmeli
+      (TC, ad/isim, telefon, doğum tarihi içeren alanlar atılmalı)
+    - Sadece PII'siz alanlar block olarak basılır
 
     Form Responses DB yoksa ValueError. Geriye page_id döner.
     """
@@ -312,11 +322,12 @@ def create_form_response_page(
     result = _notion_post("/pages", payload)
     page_id = result["id"]
 
-    # Soru-cevap çiftlerini sayfa içine block olarak da bas
-    if answers:
+    # KVKK güvencesi: answers içeriği VARSAYILAN OLARAK block'a yazılmaz.
+    # Açıkça `include_clinical_blocks=True` ve PII filtreli answers gerekir.
+    if answers and include_clinical_blocks:
         blocks = [
-            _heading2("📋 Anamnez Yanıtları"),
-            _paragraph(f"Gönderilme: {submitted_at}"),
+            _heading2("📋 Klinik Yanıtlar (PII filtreli)"),
+            _paragraph(f"Gönderilme: {submitted_date}"),
             _divider(),
         ]
         for question, answer in answers.items():

@@ -58,11 +58,31 @@ Modüler monolit, 5 ana modül + main.py orkestratör + admin web UI.
 | Sağlayıcı | Konum | KVKK | ISO 27001 | Tipik Klinik Plan | Aylık (~TL) |
 |-----------|-------|------|-----------|-------------------|-------------|
 | **Vargonen** | İzmir, İstanbul | ✅ | ✅ | 2 vCPU / 4GB / 80GB | 250-400 |
+| **hosting.com.tr** | İstanbul | ✅ DPA | ⚠️ sadece DC | 2 vCPU / 4GB / 80GB | bakılmalı |
 | **Turkcell Bulut** | Türkiye | ✅ | ✅ | 2 vCPU / 4GB / 80GB | 350-600 |
 | **TT Bulut** | Türkiye | ✅ | ✅ | 2 vCPU / 4GB / 80GB | 300-500 |
 | **DorukNet** | İstanbul | ✅ | ✅ | 2 vCPU / 4GB / 80GB | 400-700 |
 | Hetzner (Helsinki) | AB | ⚠️ açık rıza şart | ✅ | 2 vCPU / 4GB / 40GB | ~120 |
 | AWS / GCP / Azure | ABD/AB | ❌ sağlık verisi için | — | — | — |
+
+### hosting.com.tr — Detaylı Notlar (yanıt 2026-05-04)
+- ✅ İstanbul lokasyon, DPA imzalanabiliyor
+- ✅ Disk şifreleme (BitLocker/LUKS) — anahtar müşteride
+- ✅ Yedek Türkiye + şifreli, 7 gün saklama
+- ✅ 30 gün içinde kalıcı silme + yazılı beyan
+- ✅ Güvenlik olayı bildirimi 10-90 dk
+- ✅ Erişim rol-bazlı, veri merkezi ISO 27001/27017/27018
+- ❌ Firma direkt ISO 27001 yok (sadece DC) — KVKK denetiminde zayıf
+- ❌ DR site yok, SLA taahhüdü yok
+- ❌ Yedek test kayıtları paylaşılmıyor
+- ❌ VERBİS kayıtlı değil (planlama aşamasında)
+- KDV %20, e-fatura/e-arşiv, yıllık ödemede 15 gün koşulsuz iade
+- VDS (VMware) kurumsal, VPS (KVM) esnek
+- URL: hosting.com.tr/server/vds-server/  veya /vps-server/
+
+**Önerim:** Vargonen önde (firma ISO 27001), hosting.com.tr ikincil seçenek
+(fiyat avantajı varsa kıyaslanabilir). Karar için Vargonen'den DPA + fiyat
+teklifi istenmeli.
 
 **Önerim:** Vargonen — küçük klinik için iyi destek + KVKK belgesi + makul fiyat.
 Hetzner sadece gerçekten bütçe darsa ve hukuk uzmanı **özel açık rıza** taslağını onaylarsa.

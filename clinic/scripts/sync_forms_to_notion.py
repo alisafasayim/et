@@ -164,14 +164,23 @@ def sync_response_to_notion(
         result["status"] = "patient_only"
         result["form_response_page_id"] = patient_root_id
     else:
+        # KVKK PII redaction — sadece klinik alanlar Notion'a gider.
+        # PII alanları (TC, ad, telefon, anne-baba ad/meslek, okul, vs.)
+        # patient_registry'ye Fernet ile şifreli yazılır (yerel-only).
+        from pii_classification import redact_pii
+        clinical_only = redact_pii(answers)
+
         page_id = create_form_response_page(
             patient_page_id=patient_root_id,
             patient_name=pseudonym_display,
             submitted_at=submitted_at,
-            answers=answers,
+            answers=clinical_only,
+            include_clinical_blocks=True,  # PII filtreli klinik alanlar OK
         )
         result["status"] = "synced"
         result["form_response_page_id"] = page_id
+        result["clinical_field_count"] = len(clinical_only)
+        result["pii_field_count"] = len(answers) - len(clinical_only)
 
     meta_json = json.dumps({
         "form_response_page_id": result.get("form_response_page_id", ""),
