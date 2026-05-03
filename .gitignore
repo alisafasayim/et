@@ -37,7 +37,25 @@ clinic/audio_inbox/
 clinic/audio_processed/
 clinic/credentials.json
 clinic/token.json
+clinic/token_*.json
 clinic/*.soap.json
+
+# Geçici test/debug dosyaları (Evolution API + Notion API yanıtları)
+clinic/connect*.json
+clinic/create*.json
+clinic/inst_state.json
+clinic/pair*.json
+clinic/pairing*.json
+clinic/qr_*.json
+clinic/qr_*.txt
+clinic/v21_*.json
+clinic/whatsapp_qr.png
+clinic/check_pages_tmp.py
+clinic/test_pii_redaction.py
+clinic/evolution_data/
+clinic/evolution_data_v21/
+clinic/postgres_data/
+
 clinic_automation/.env
 clinic_automation/.encryption_key
 clinic_automation/.rsa_key*.pem

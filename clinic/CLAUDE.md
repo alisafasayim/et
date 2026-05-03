@@ -57,13 +57,21 @@ Modüler monolit, 5 ana modül + main.py orkestratör + admin web UI.
 
 | Sağlayıcı | Konum | KVKK | ISO 27001 | Tipik Klinik Plan | Aylık (~TL) |
 |-----------|-------|------|-----------|-------------------|-------------|
-| **Vargonen** | İzmir, İstanbul | ✅ | ✅ | 2 vCPU / 4GB / 80GB | 250-400 |
-| **hosting.com.tr** | İstanbul | ✅ DPA | ⚠️ sadece DC | 2 vCPU / 4GB / 80GB | bakılmalı |
-| **Turkcell Bulut** | Türkiye | ✅ | ✅ | 2 vCPU / 4GB / 80GB | 350-600 |
-| **TT Bulut** | Türkiye | ✅ | ✅ | 2 vCPU / 4GB / 80GB | 300-500 |
-| **DorukNet** | İstanbul | ✅ | ✅ | 2 vCPU / 4GB / 80GB | 400-700 |
+| ~~Vargonen~~ | İzmir, İst | — | — | — | **REDDEDİLDİ** (kullanıcı: çok şikayet, memnuniyet yok) |
+| **Radore** ⭐ | İstanbul (1996) | ✅ Firma | ✅ DPA | 2 vCPU / 4GB / 80GB | 350-600 |
+| **NetInternet** ⭐ | İstanbul | ✅ Firma | ✅ VeriKalkanı | 2 vCPU / 4GB / 80GB | 200-400 |
+| **DorukNet** ⭐ | İstanbul | ✅ 27001+27017+27018 | ✅ DPA | 2 vCPU / 4GB / 80GB | 400-700 |
+| **Bulutistan** | İstanbul | ✅ Firma | ✅ Sağlık özel | 2 vCPU / 4GB / 80GB | 300-500 |
+| **hosting.com.tr** | İstanbul | ⚠️ sadece DC | ✅ DPA | 2 vCPU / 4GB / 80GB | bakılmalı |
+| **TT Bulut** | Türkiye | ✅ | ✅ | 2 vCPU / 4GB / 80GB | 350-600 (bürokrasi) |
 | Hetzner (Helsinki) | AB | ⚠️ açık rıza şart | ✅ | 2 vCPU / 4GB / 40GB | ~120 |
 | AWS / GCP / Azure | ABD/AB | ❌ sağlık verisi için | — | — | — |
+
+**Yeni öneri sırası (Vargonen reddinden sonra):**
+1. **Radore** — en güvenli orta nokta (30 yıl + ISO firma + kurumsal müşteri tabanı)
+2. **NetInternet** — bütçe-uygun + KVKK için "VeriKalkanı" özel paketi
+3. **DorukNet** — denetim için altın standart (27001/27017/27018 üçü birden)
+4. **Bulutistan** — sağlık+finans niş, küçük şirket (destek saati kontrol)
 
 ### hosting.com.tr — Detaylı Notlar (yanıt 2026-05-04)
 - ✅ İstanbul lokasyon, DPA imzalanabiliyor
