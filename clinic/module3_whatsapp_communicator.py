@@ -987,6 +987,130 @@ def _handle_messages_upsert(event: dict) -> None:
             handle_cancellation_request(sender_phone, message_body)
         elif classification == "reschedule":
             handle_reschedule_request(sender_phone, message_body)
+        else:  # "other"
+            try:
+                handle_other_message(sender_phone, message_body)
+            except Exception as exc:
+                logger.error("Other message handler hatası: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Otomatik yanıt akışı — "other" kategorisi
+# ---------------------------------------------------------------------------
+
+AUTO_REPLY_OFFICE_HOURS = (
+    "Merhaba 👋 Mesajınız Dr. Ali Safa Sayım'a iletildi.\n"
+    "Klinik mesai saatleri: Hafta içi 09:00-21:00.\n"
+    "Mesajınıza en kısa sürede dönüş yapılacak.\n\n"
+    "Acil durum / kriz: 112 veya 182 (ALO 182 sağlık)"
+)
+
+AUTO_REPLY_OFF_HOURS = (
+    "Merhaba 👋 Şu an klinik dışı saatlerdeyiz.\n"
+    "Klinik saatleri: Hafta içi 09:00-21:00.\n"
+    "Mesajınız iletildi, sabah ilk fırsatta dönüş yapılacak.\n\n"
+    "Acil durum / kriz: 112 veya 182 (ALO 182 sağlık)"
+)
+
+DOCTOR_NEW_CONTACT_TEMPLATE = (
+    "📩 YENİ WhatsApp iletişimi\n"
+    "Numara: {sender_phone}\n"
+    "Mesaj önizleme: {preview}\n\n"
+    "(Bu numara daha önce klinikle WhatsApp üzerinden iletişim kurmamış.)"
+)
+
+
+def handle_other_message(sender_phone: str, message_text: str) -> dict:
+    """
+    'other' kategorisindeki mesajlar için otomatik yanıt akışı.
+
+    Davranış:
+    - Mesai içi (09-21 default): standart "alındı, döneceğim" yanıtı
+    - Mesai dışı: "şu an mesai dışı, sabah dönülecek" yanıtı
+    - İlk kez iletişim kuran numara: doktora bildirim (state_store ile
+      idempotent — aynı numaradan mesajda 2. bildirim gitmez)
+    - Audit log: m.12 uyumlu kayıt
+
+    Env:
+        WHATSAPP_OFFICE_HOUR_START=9
+        WHATSAPP_OFFICE_HOUR_END=21
+        WHATSAPP_AUTO_REPLY_ENABLED=true (default)
+    """
+    handler_logger = logging.getLogger("whatsapp.other")
+    result = {
+        "sender": sender_phone,
+        "auto_reply_sent": False,
+        "doctor_notified": False,
+        "audit_logged": False,
+        "in_office_hours": False,
+        "is_first_contact": False,
+    }
+
+    if os.getenv("WHATSAPP_AUTO_REPLY_ENABLED", "true").lower() != "true":
+        handler_logger.info("WHATSAPP_AUTO_REPLY_ENABLED=false, otomatik yanıt atlandı")
+        return result
+
+    # 1. Mesai saati kontrolü
+    start_h = int(os.getenv("WHATSAPP_OFFICE_HOUR_START", "9"))
+    end_h = int(os.getenv("WHATSAPP_OFFICE_HOUR_END", "21"))
+    in_hours = start_h <= datetime.now().hour < end_h
+    result["in_office_hours"] = in_hours
+
+    reply_text = AUTO_REPLY_OFFICE_HOURS if in_hours else AUTO_REPLY_OFF_HOURS
+
+    # 2. Otomatik yanıt gönder
+    try:
+        send_whatsapp_message(sender_phone, reply_text)
+        result["auto_reply_sent"] = True
+    except Exception as exc:
+        handler_logger.error("Otomatik yanıt gönderilemedi: %s", exc)
+
+    # 3. İlk kez iletişim mi? (state_store ile idempotent)
+    try:
+        from state_store import get_default_store
+        store = get_default_store()
+        is_first = not store.is_seen("whatsapp_contact", sender_phone)
+        result["is_first_contact"] = is_first
+        if is_first:
+            store.mark_seen(
+                "whatsapp_contact", sender_phone,
+                meta=f'{{"first_seen": "{datetime.now().astimezone().isoformat()}"}}',
+            )
+
+            # Doktora bildirim sadece yeni numaralarda
+            doctor_phone = os.getenv("DOCTOR_PHONE", "")
+            if doctor_phone and doctor_phone != sender_phone:
+                try:
+                    preview = message_text[:100] + ("..." if len(message_text) > 100 else "")
+                    notification = DOCTOR_NEW_CONTACT_TEMPLATE.format(
+                        sender_phone=sender_phone,
+                        preview=preview,
+                    )
+                    send_whatsapp_message(doctor_phone, notification)
+                    result["doctor_notified"] = True
+                except Exception as exc:
+                    handler_logger.error("Doktor bildirimi gönderilemedi: %s", exc)
+    except Exception as exc:
+        handler_logger.error("State store kontrolü başarısız: %s", exc)
+
+    # 4. Audit log
+    try:
+        from audit_log import get_default_audit_log
+        get_default_audit_log().record(
+            actor="whatsapp_chatbot",
+            action="other_message.received",
+            details={
+                "sender_phone": sender_phone,
+                "in_office_hours": in_hours,
+                "is_first_contact": result["is_first_contact"],
+                "preview": message_text[:200],
+            },
+        )
+        result["audit_logged"] = True
+    except Exception:
+        pass
+
+    return result
 
 
 def _handle_connection_update(event: dict) -> None:
