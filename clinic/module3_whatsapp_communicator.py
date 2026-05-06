@@ -188,19 +188,41 @@ def get_instance_status() -> dict:
 
 def send_whatsapp_message(phone: str, message: str) -> dict:
     """
-    Evolution API üzerinden belirtilen numaraya WhatsApp mesajı gönderir.
+    WAHA üzerinden belirtilen numaraya WhatsApp mesajı gönderir.
     phone: ham telefon numarası (herhangi bir format)
+
+    NOT: Evolution API yerine WAHA (Whatsapp HTTP API) kullanılır.
+    Evolution Baileys protokol uyumsuzluğu yüzünden bağlantı kuramıyordu;
+    WAHA daha güncel Baileys fork'u ile sorunsuz çalışıyor.
     """
     normalized = _normalize_phone(phone)
+    waha_url = os.getenv("WAHA_URL", "http://localhost:3000")
+    waha_key = os.getenv("WAHA_API_KEY", "")
+    waha_session = os.getenv("WAHA_SESSION", "default")
+
+    if not waha_key:
+        raise EnvironmentError("WAHA_API_KEY çevre değişkeni ayarlanmamış.")
+
+    # WAHA chatId formatı: 905XXXXXXXX@c.us (kişisel) veya @g.us (grup)
+    chat_id = f"{normalized}@c.us"
     payload = {
-        "number": normalized,
+        "session": waha_session,
+        "chatId": chat_id,
         "text": message,
-        "delay": 1200,   # ms cinsinden gönderim gecikmesi (doğal görünüm için)
     }
-    result = _evo_post(
-        f"/message/sendText/{EVOLUTION_INSTANCE_NAME}", payload
+
+    response = requests.post(
+        f"{waha_url}/api/sendText",
+        json=payload,
+        headers={"X-Api-Key": waha_key, "Content-Type": "application/json"},
+        timeout=30,
     )
-    logger.info("Mesaj gönderildi → %s | messageId: %s", normalized, result.get("key", {}).get("id"))
+    response.raise_for_status()
+    result = response.json()
+    logger.info(
+        "Mesaj gönderildi → %s | messageId: %s",
+        normalized, result.get("key", {}).get("id"),
+    )
     return result
 
 
@@ -940,6 +962,7 @@ def whatsapp_webhook():
     event_type = event.get("event", "")
     logger.info("Webhook alındı: %s", event_type)
 
+    # Evolution API formatı (eski)
     if event_type == "MESSAGES_UPSERT":
         _handle_messages_upsert(event)
     elif event_type == "CONNECTION_UPDATE":
@@ -947,7 +970,68 @@ def whatsapp_webhook():
     elif event_type == "MESSAGES_UPDATE":
         pass  # Okundu bildirimleri; şimdilik yoksayılıyor
 
+    # WAHA formatı (yeni — daha güncel library)
+    elif event_type == "message":
+        _handle_waha_message(event)
+    elif event_type == "session.status":
+        logger.info("WAHA session status: %s", event.get("payload", {}).get("status"))
+
     return jsonify({"status": "ok"}), 200
+
+
+def _handle_waha_message(event: dict) -> None:
+    """
+    WAHA 'message' event'ini işler.
+
+    WAHA event formatı:
+    {
+      "event": "message",
+      "session": "default",
+      "payload": {
+        "id": "...",
+        "from": "905XXX@c.us",
+        "fromMe": false,
+        "body": "metin",
+        "timestamp": ...,
+        "hasMedia": false,
+        ...
+      }
+    }
+    """
+    payload = event.get("payload", {})
+
+    # Kendi gönderdiğimiz mesajları atla
+    if payload.get("fromMe"):
+        return
+
+    sender = payload.get("from", "")
+    # WAHA chatId formatı: 905XXX@c.us → numarayı ayıkla
+    sender_phone = sender.replace("@c.us", "").replace("@s.whatsapp.net", "")
+
+    message_body = payload.get("body", "")
+    if not message_body:
+        return
+
+    logger.info("Gelen mesaj (WAHA) | %s: %s", sender_phone, message_body[:80])
+
+    classification = classify_incoming_message(message_body)
+
+    if classification == "emergency":
+        try:
+            handle_emergency_message(sender_phone, message_body)
+        except Exception as exc:
+            logger.error("Emergency handler hatası: %s", exc)
+        return
+
+    if classification == "cancellation":
+        handle_cancellation_request(sender_phone, message_body)
+    elif classification == "reschedule":
+        handle_reschedule_request(sender_phone, message_body)
+    else:  # "other"
+        try:
+            handle_other_message(sender_phone, message_body)
+        except Exception as exc:
+            logger.error("Other message handler hatası: %s", exc)
 
 
 def _handle_messages_upsert(event: dict) -> None:
