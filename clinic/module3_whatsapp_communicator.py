@@ -189,13 +189,14 @@ def get_instance_status() -> dict:
 def send_whatsapp_message(phone: str, message: str) -> dict:
     """
     WAHA üzerinden belirtilen numaraya WhatsApp mesajı gönderir.
-    phone: ham telefon numarası (herhangi bir format)
+    phone: ham telefon numarası VEYA tam chatId (örn 'XXXX@lid', 'XXXX@c.us').
 
-    NOT: Evolution API yerine WAHA (Whatsapp HTTP API) kullanılır.
-    Evolution Baileys protokol uyumsuzluğu yüzünden bağlantı kuramıyordu;
-    WAHA daha güncel Baileys fork'u ile sorunsuz çalışıyor.
+    @ içerirse RAW chatId olarak kullanılır (normalize edilmez). Bu, WhatsApp
+    Multi-Device protokolünde gizli kimliklerle (@lid = Linked Identity)
+    yanıt verebilmek için gerekli — `@lid` adresleri gerçek numara değil
+    sadece WhatsApp'ın iç tanımlayıcısıdır, normalize edilirse yanlış
+    var-olmayan numaraya mesaj gider.
     """
-    normalized = _normalize_phone(phone)
     waha_url = os.getenv("WAHA_URL", "http://localhost:3000")
     waha_key = os.getenv("WAHA_API_KEY", "")
     waha_session = os.getenv("WAHA_SESSION", "default")
@@ -203,8 +204,14 @@ def send_whatsapp_message(phone: str, message: str) -> dict:
     if not waha_key:
         raise EnvironmentError("WAHA_API_KEY çevre değişkeni ayarlanmamış.")
 
-    # WAHA chatId formatı: 905XXXXXXXX@c.us (kişisel) veya @g.us (grup)
-    chat_id = f"{normalized}@c.us"
+    # Phone zaten chatId formatında ise (@ içerir) → olduğu gibi kullan
+    if "@" in phone:
+        chat_id = phone
+        normalized = phone  # log için
+    else:
+        # Ham telefon numarası → @c.us postfix ekle
+        normalized = _normalize_phone(phone)
+        chat_id = f"{normalized}@c.us"
     payload = {
         "session": waha_session,
         "chatId": chat_id,
@@ -1004,9 +1011,16 @@ def _handle_waha_message(event: dict) -> None:
     if payload.get("fromMe"):
         return
 
-    sender = payload.get("from", "")
-    # WAHA chatId formatı: 905XXX@c.us → numarayı ayıkla
-    sender_phone = sender.replace("@c.us", "").replace("@s.whatsapp.net", "")
+    sender = payload.get("from", "")  # örn '905XXX@c.us' veya 'XXXX@lid'
+    # @c.us ve @s.whatsapp.net postfix'leri çıkar; @lid'i KORU (raw chatId
+    # ile yanıt vermek için — multi-device protokolünde @lid resolved
+    # phone değil, sender'ın WhatsApp iç kimliği).
+    if sender.endswith("@c.us") or sender.endswith("@s.whatsapp.net"):
+        sender_phone = sender.replace("@c.us", "").replace("@s.whatsapp.net", "")
+    else:
+        # @lid veya benzeri iç kimlik → tam chatId olarak tut, send fonksiyonu
+        # raw kullanır
+        sender_phone = sender
 
     message_body = payload.get("body", "")
     if not message_body:
