@@ -14,6 +14,7 @@ deterministik regex tabanlı taraması yapılır.
   - none    : risk içeren ifade tespit edilmedi
 """
 
+import json
 import logging
 import os
 import re
@@ -203,7 +204,10 @@ def record_risk_event(
         store = get_default_store()
         # Her event ayrı kayıt olsun — key olarak timestamp + source
         key = f"{record['recorded_at']}:{source}"
-        store.claim("risk_events", key, meta=record)
+        # StateStore.claim meta'yı SQLite TEXT'e bind eder; dict yerine
+        # JSON serialize edilmiş string vermek gerek (yoksa ProgrammingError:
+        # type 'dict' is not supported).
+        store.claim("risk_events", key, meta=json.dumps(record, ensure_ascii=False))
         logger.warning(
             "Risk event kaydedildi | level=%s | source=%s | %s",
             level.value, source, summary[:100],
