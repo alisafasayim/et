@@ -1,0 +1,101 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Klinik runtime artifacts
+*.env
+.env
+.env.*
+!.env.example
+.encryption_key
+*.key
+*.pem
+credentials.json
+service_account.json
+token.json
+clinic/.env
+clinic/clinic.log
+clinic/clinic_state.db
+clinic/clinic_state.db-wal
+clinic/clinic_state.db-shm
+clinic/patient_registry.db
+clinic/patient_registry.db-wal
+clinic/patient_registry.db-shm
+clinic/audit_log.db
+clinic/audit_log.db-wal
+clinic/audit_log.db-shm
+clinic/audio_inbox/
+clinic/audio_processed/
+clinic/credentials.json
+clinic/token.json
+clinic/token_*.json
+clinic/*.soap.json
+
+# Geçici test/debug dosyaları (Evolution API + Notion API yanıtları)
+clinic/connect*.json
+clinic/create*.json
+clinic/inst_state.json
+clinic/pair*.json
+clinic/pairing*.json
+clinic/qr_*.json
+clinic/qr_*.txt
+clinic/v21_*.json
+clinic/whatsapp_qr.png
+clinic/check_pages_tmp.py
+clinic/test_pii_redaction.py
+clinic/evolution_data/
+clinic/evolution_data_v21/
+clinic/postgres_data/
+
+clinic_automation/.env
+clinic_automation/.encryption_key
+clinic_automation/.rsa_key*.pem
+clinic_automation/credentials.json
+clinic_automation/service_account.json
+clinic_automation/.venv/
+clinic_automation/audio_files/
+clinic_automation/Yeni klasör/
+doctor_messages.txt
+*.m4a
+*.mp3
+*.wav
+*.done
+
+# Runtime artifact'ler — test cwd'sine bağlı olarak repo kökünde
+# de oluşabilir; generic pattern ile her yerde yoksay.
+*.log
+*.db
+*.db-wal
+*.db-shm
+
+# OS
+.DS_Store
+Thumbs.db
+
+# UI test screenshots
+*.png
+.playwright-mcp/
+
+# Local Claude config
+.claude/settings.local.json
+
+# KVKK — yerel transkript, mesaj export, hasta verisi
+clinic/reports/
+clinic/samsung_extract/
+clinic/samsung_notes/
+clinic/whatsapp_qr.png
+clinic/waha_qr.png
+clinic/qr_response.json
+clinic/waha_data/
+clinic/postgres_data/
+clinic/evolution_data/
+clinic/rag_db/

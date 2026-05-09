@@ -1,0 +1,201 @@
+{% extends "admin/base.html" %}
+{% block title %}WhatsApp Onay — {{ super() }}{% endblock %}
+
+{% block content %}
+<style>
+  .draft-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px;
+    margin-bottom: 14px;
+  }
+  .draft-card.pending { border-left: 4px solid var(--warning); }
+  .draft-meta {
+    display: flex;
+    justify-content: space-between;
+    color: var(--muted);
+    font-size: 12px;
+    margin-bottom: 10px;
+  }
+  .msg-bubble {
+    background: #f1f5f9;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin: 8px 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .msg-bubble.incoming { background: #f1f5f9; }
+  .msg-bubble.outgoing { background: #dcfce7; }
+  textarea.draft-edit {
+    width: 100%;
+    min-height: 60px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 14px;
+    resize: vertical;
+  }
+  .similar-toggle {
+    cursor: pointer;
+    color: var(--accent);
+    font-size: 12px;
+    margin: 8px 0;
+    user-select: none;
+  }
+  .similar-list {
+    display: none;
+    background: #fafbfc;
+    padding: 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .similar-list.open { display: block; }
+  .similar-item { margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px dashed var(--border); }
+  .similar-item:last-child { border-bottom: 0; }
+  .actions { display: flex; gap: 8px; margin-top: 10px; }
+  .actions form { margin: 0; }
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .pill.in-hours { background: #dcfce7; color: var(--success); }
+  .pill.out-hours { background: #fef3c7; color: var(--warning); }
+  .pill.first-contact { background: #dbeafe; color: var(--accent); }
+  .stats-row { display: flex; gap: 16px; margin-bottom: 16px; }
+  .stat-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 18px;
+    flex: 1;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 12px 0;
+    font-weight: 600;
+  }
+</style>
+
+<h1>📱 WhatsApp Cevap Onayı</h1>
+
+<div class="stats-row">
+  <div class="stat-box">
+    <div class="stat" style="color: var(--warning)">{{ pending|length }}</div>
+    <div class="stat-label">Bekleyen</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat" style="color: var(--success)">{{ history|length }}</div>
+    <div class="stat-label">Gönderilen (son 20)</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat" style="color: var(--muted)">{{ dismissed|length }}</div>
+    <div class="stat-label">Atılan (son 20)</div>
+  </div>
+</div>
+
+<p style="color: var(--muted); font-size: 13px;">
+  AI taslakları gerçek hasta için <strong>doktor onayından sonra</strong> gönderilir
+  (KVKK m.10 — özel nitelikli sağlık verisinde otomatik karar yasak).
+  Düzenleyin → Gönder, ya da uygun değilse At.
+</p>
+
+{% if pending %}
+<h2>🟡 Bekleyen ({{ pending|length }})</h2>
+{% for draft in pending %}
+<div class="draft-card pending">
+  <div class="draft-meta">
+    <span>
+      <strong>{{ draft.sender }}</strong>
+      {% if draft.in_office_hours %}
+        <span class="pill in-hours">Mesai içi</span>
+      {% else %}
+        <span class="pill out-hours">Mesai dışı</span>
+      {% endif %}
+    </span>
+    <span>{{ draft.received_at[:16] | replace('T', ' ') }}</span>
+  </div>
+
+  <div class="msg-bubble incoming">{{ draft.message }}</div>
+
+  <form method="POST" action="{{ url_for('admin_ui.whatsapp_send', draft_key=draft._key) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label style="font-size: 12px; color: var(--muted);">AI Taslak (düzenleyebilirsiniz):</label>
+    <textarea class="draft-edit" name="text" required>{{ draft.draft or '' }}</textarea>
+
+    {% if draft.error %}
+      <div style="color: var(--error); font-size: 12px; margin-top: 6px;">
+        ⚠️ AI hatası: {{ draft.error }}
+      </div>
+    {% endif %}
+
+    {% if draft.hits %}
+    <div class="similar-toggle" onclick="this.nextElementSibling.classList.toggle('open')">
+      ▸ Benzer 3 geçmiş örnek (görmek için tıkla)
+    </div>
+    <div class="similar-list">
+      {% for hit in draft.hits %}
+      <div class="similar-item">
+        <div><strong>Hasta:</strong> {{ hit.q }}</div>
+        <div><strong>Cevap:</strong> {{ hit.a }}</div>
+        <div style="font-size: 10px; color: var(--muted);">benzerlik: {{ '%.2f'|format(hit.sim) }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <div class="actions">
+      <button type="submit" class="btn">📤 Gönder</button>
+    </form>
+    <form method="POST" action="{{ url_for('admin_ui.whatsapp_dismiss', draft_key=draft._key) }}" style="display:inline;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn secondary">At</button>
+    </form>
+    </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="card empty">
+  <h3 style="color: var(--success);">✓ Tüm mesajlar yanıtlanmış</h3>
+  <p style="color: var(--muted);">Bekleyen draft yok.</p>
+</div>
+{% endif %}
+
+{% if history %}
+<details>
+  <summary>📤 Son Gönderilenler ({{ history|length }})</summary>
+  {% for draft in history %}
+  <div class="draft-card">
+    <div class="draft-meta">
+      <strong>{{ draft.sender }}</strong>
+      <span>{{ draft.actioned_at[:16] | replace('T', ' ') }}</span>
+    </div>
+    <div class="msg-bubble incoming">{{ draft.message }}</div>
+    <div class="msg-bubble outgoing">{{ draft.sent_text or draft.draft }}</div>
+  </div>
+  {% endfor %}
+</details>
+{% endif %}
+
+{% if dismissed %}
+<details>
+  <summary>🗑 Atılanlar ({{ dismissed|length }})</summary>
+  {% for draft in dismissed %}
+  <div class="draft-card">
+    <div class="draft-meta">
+      <strong>{{ draft.sender }}</strong>
+      <span>{{ draft.actioned_at[:16] | replace('T', ' ') }}</span>
+    </div>
+    <div class="msg-bubble incoming">{{ draft.message }}</div>
+  </div>
+  {% endfor %}
+</details>
+{% endif %}
+
+{% endblock %}

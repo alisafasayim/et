@@ -1,0 +1,15 @@
+{% extends "admin/base.html" %}
+{% block title %}Giriş — Klinik Admin{% endblock %}
+{% block content %}
+<div class="card" style="max-width: 400px; margin: 60px auto;">
+  <h1>🏥 Klinik Admin</h1>
+  <p class="muted">Lütfen yönetici token'ınızla giriş yapın.</p>
+  <form method="post">
+    <div class="row">
+      <label for="token">Yönetici Token</label>
+      <input type="password" name="token" id="token" autofocus required>
+    </div>
+    <button type="submit">Giriş Yap</button>
+  </form>
+</div>
+{% endblock %}

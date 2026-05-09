@@ -1,0 +1,69 @@
+# systemd unit — Klinik Yönetim Sistemi
+#
+# Kurulum:
+#   sudo cp scripts/clinic.service /etc/systemd/system/clinic.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now clinic
+#   sudo journalctl -u clinic -f
+#
+# Servis adı: clinic
+# Çalıştıran kullanıcı: clinic (önceden oluşturulmalı: useradd -r -m clinic)
+# Repo yolu (örnek): /home/clinic/et/clinic
+#
+# Aşağıdaki <PLACEHOLDER>'ları kendi sunucunuza göre düzenleyin.
+
+[Unit]
+Description=Klinik Yönetim Sistemi (clinic main.py)
+Documentation=file:///home/clinic/et/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clinic
+Group=clinic
+WorkingDirectory=/home/clinic/et/clinic
+
+# .env dosyası systemd tarafından okunur (key=value formatı, tırnak yok).
+# python-dotenv da modül seviyesinde yüklüyor; çift güvence.
+EnvironmentFile=/home/clinic/et/clinic/.env
+
+# Python sanal ortamı
+ExecStart=/home/clinic/et/clinic/.venv/bin/python /home/clinic/et/clinic/main.py
+
+# Otomatik yeniden başlatma — supervisor zaten thread'leri restart ediyor,
+# proses çökerse sistem üst seviyede de tekrar başlatır.
+Restart=on-failure
+RestartSec=10s
+
+# Log'lar journalctl'e gider; clinic.log dosyası rotation ile zaten
+# dahili log tutar. systemd journal sınırı için:
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=clinic
+
+# Güvenlik sıkılaştırması (KVKK m.12)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false   # PyTorch JIT compile için kapatıldı
+
+# Yazma izni verilen dizinler (ses kayıtları + DB'ler + log'lar)
+ReadWritePaths=/home/clinic/et/clinic
+
+# Kaynak limitleri
+LimitNOFILE=65536
+# Bellek: Whisper large-v3 ~5 GB; 4 GB minimum, sıkışırsa swap kullanır
+MemoryHigh=6G
+MemoryMax=8G
+
+[Install]
+WantedBy=multi-user.target
