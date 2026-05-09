@@ -20,6 +20,7 @@ import hmac
 import json
 import logging
 import os
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1118,25 +1119,62 @@ DOCTOR_NEW_CONTACT_TEMPLATE = (
 )
 
 
+def _generate_rag_draft(message_text: str) -> dict:
+    """
+    Gelen mesaj için RAG bazlı taslak cevap üretir.
+
+    Pipeline: Chroma vektör DB'den 3 benzer geçmiş Q&A çek → Ollama'ya
+    sıkı prompt ile draft yazdır → result döner.
+
+    Hata olursa graceful: result["draft"] = None döner, handler devam eder.
+    """
+    try:
+        # rag_query.py modülünü kullan (script ama import edilebilir)
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
+        from rag_query import query as rag_query_fn, call_ollama, RAG_PROMPT
+
+        hits = rag_query_fn(message_text, top_k=3)
+        if not hits:
+            return {"draft": None, "hits": [], "error": "Benzer örnek yok"}
+
+        examples = "\n".join([
+            f"Örnek {i+1}:\n  Soru: {h['question'][:300]}\n  Cevap: {h['answer'][:400]}\n"
+            for i, h in enumerate(hits)
+        ])
+        prompt = RAG_PROMPT.format(examples=examples, query=message_text)
+        draft = call_ollama(prompt)
+
+        return {
+            "draft": draft,
+            "hits": [{"q": h["question"][:200], "a": h["answer"][:200], "sim": 1 - h["distance"]} for h in hits],
+            "error": None,
+        }
+    except Exception as exc:
+        return {"draft": None, "hits": [], "error": str(exc)}
+
+
 def handle_other_message(sender_phone: str, message_text: str) -> dict:
     """
-    'other' kategorisindeki mesajlar için otomatik yanıt akışı.
+    'other' kategorisindeki mesajlar için RAG draft + state_store akışı.
 
-    Davranış:
-    - Mesai içi (09-21 default): standart "alındı, döneceğim" yanıtı
-    - Mesai dışı: "şu an mesai dışı, sabah dönülecek" yanıtı
-    - İlk kez iletişim kuran numara: doktora bildirim (state_store ile
-      idempotent — aynı numaradan mesajda 2. bildirim gitmez)
-    - Audit log: m.12 uyumlu kayıt
+    YENİ DAVRANIŞ (KVKK m.10 uyumlu):
+    - RAG ile taslak cevap üret (gönderim YOK, sadece kayıt)
+    - state_store 'whatsapp_drafts' namespace'ine yaz
+    - Doktor admin UI'da görür, onaylar/düzenler/gönderir
+    - İlk kez iletişim → doktora bildirim (sadece yeni numaralar)
+
+    ESKİ DAVRANIŞ (geriye uyumluluk):
+    - Eğer WHATSAPP_AUTO_REPLY_ENABLED=true ise eski "alındı, döneceğim"
+      otomatik yanıt akışı çalışır (default: false → RAG draft yolu)
 
     Env:
-        WHATSAPP_OFFICE_HOUR_START=9
-        WHATSAPP_OFFICE_HOUR_END=21
-        WHATSAPP_AUTO_REPLY_ENABLED=true (default)
+        WHATSAPP_RAG_DRAFT_ENABLED=true (default) — RAG draft oluştur
+        WHATSAPP_AUTO_REPLY_ENABLED=false (default) — eski auto-reply yok
     """
     handler_logger = logging.getLogger("whatsapp.other")
     result = {
         "sender": sender_phone,
+        "draft_created": False,
         "auto_reply_sent": False,
         "doctor_notified": False,
         "audit_logged": False,
@@ -1144,24 +1182,53 @@ def handle_other_message(sender_phone: str, message_text: str) -> dict:
         "is_first_contact": False,
     }
 
-    if os.getenv("WHATSAPP_AUTO_REPLY_ENABLED", "true").lower() != "true":
-        handler_logger.info("WHATSAPP_AUTO_REPLY_ENABLED=false, otomatik yanıt atlandı")
-        return result
+    rag_enabled = os.getenv("WHATSAPP_RAG_DRAFT_ENABLED", "true").lower() == "true"
+    auto_reply_enabled = os.getenv("WHATSAPP_AUTO_REPLY_ENABLED", "false").lower() == "true"
 
-    # 1. Mesai saati kontrolü
+    # 1. Mesai saati kontrolü (her iki yol için bilgi amaçlı)
     start_h = int(os.getenv("WHATSAPP_OFFICE_HOUR_START", "9"))
     end_h = int(os.getenv("WHATSAPP_OFFICE_HOUR_END", "21"))
     in_hours = start_h <= datetime.now().hour < end_h
     result["in_office_hours"] = in_hours
 
-    reply_text = AUTO_REPLY_OFFICE_HOURS if in_hours else AUTO_REPLY_OFF_HOURS
+    # 2. RAG draft oluştur (default mod) — gönderim YOK
+    if rag_enabled:
+        draft_info = _generate_rag_draft(message_text)
+        try:
+            from state_store import get_default_store
+            import json as _json
+            store = get_default_store()
+            ts = datetime.now().astimezone().isoformat()
+            draft_key = f"{sender_phone}::{ts}"
+            store.mark_seen(
+                "whatsapp_drafts", draft_key,
+                meta=_json.dumps({
+                    "sender": sender_phone,
+                    "message": message_text,
+                    "draft": draft_info["draft"],
+                    "hits": draft_info["hits"],
+                    "error": draft_info["error"],
+                    "in_office_hours": in_hours,
+                    "received_at": ts,
+                    "status": "pending",
+                }, ensure_ascii=False),
+            )
+            result["draft_created"] = True
+            handler_logger.info(
+                "RAG draft oluşturuldu | %s | draft: %s",
+                sender_phone, (draft_info["draft"] or "")[:60],
+            )
+        except Exception as exc:
+            handler_logger.error("Draft kaydetme hatası: %s", exc)
 
-    # 2. Otomatik yanıt gönder
-    try:
-        send_whatsapp_message(sender_phone, reply_text)
-        result["auto_reply_sent"] = True
-    except Exception as exc:
-        handler_logger.error("Otomatik yanıt gönderilemedi: %s", exc)
+    # 3. Eski auto-reply (sadece WHATSAPP_AUTO_REPLY_ENABLED=true ise)
+    if auto_reply_enabled:
+        reply_text = AUTO_REPLY_OFFICE_HOURS if in_hours else AUTO_REPLY_OFF_HOURS
+        try:
+            send_whatsapp_message(sender_phone, reply_text)
+            result["auto_reply_sent"] = True
+        except Exception as exc:
+            handler_logger.error("Otomatik yanıt gönderilemedi: %s", exc)
 
     # 3. İlk kez iletişim mi? (state_store ile idempotent)
     try:

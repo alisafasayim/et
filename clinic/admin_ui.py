@@ -492,6 +492,152 @@ def upcoming():
 
 
 # ---------------------------------------------------------------------------
+# WhatsApp RAG Draft Onay Akışı (KVKK m.10)
+# ---------------------------------------------------------------------------
+#
+# Hasta WhatsApp mesajı gönderir → handle_other_message → RAG draft üretir
+# → state_store 'whatsapp_drafts' namespace'ine "pending" yazılır.
+#
+# Doktor /ui/whatsapp ekranından:
+#   - Pending draft'ları görür (mesaj + AI'nın taslak cevabı + benzer örnekler)
+#   - Düzenler (textarea inline)
+#   - 'Gönder' tıklar → WAHA'dan sendText → status: 'sent'
+#   - 'At' tıklar → status: 'dismissed' (cevap verme)
+#
+# KVKK m.10: AI hiçbir zaman otomatik göndermez. Doktor onayı şart.
+
+def _load_drafts(status_filter: str | None = None, limit: int = 100) -> list[dict]:
+    """state_store'dan whatsapp_drafts kayıtlarını oku."""
+    import json as _json
+    from state_store import get_default_store
+
+    store = get_default_store()
+    items = []
+    with store._cursor() as cur:
+        cur.execute(
+            "SELECT key, meta FROM processed WHERE namespace='whatsapp_drafts' "
+            "ORDER BY rowid DESC LIMIT ?",
+            (limit,),
+        )
+        for key, meta_json in cur.fetchall():
+            try:
+                meta = _json.loads(meta_json or "{}")
+            except Exception:
+                meta = {}
+            meta["_key"] = key
+            if status_filter is None or meta.get("status") == status_filter:
+                items.append(meta)
+    return items
+
+
+def _update_draft_status(key: str, status: str, edited_text: str | None = None) -> bool:
+    """Bir draft'ın status'unu güncelle (sent, dismissed)."""
+    import json as _json
+    from datetime import datetime, timezone
+    from state_store import get_default_store
+
+    store = get_default_store()
+    with store._cursor() as cur:
+        cur.execute(
+            "SELECT meta FROM processed WHERE namespace='whatsapp_drafts' AND key=?",
+            (key,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return False
+        meta = _json.loads(row[0] or "{}")
+        meta["status"] = status
+        meta["actioned_at"] = datetime.now(timezone.utc).isoformat()
+        if edited_text is not None:
+            meta["sent_text"] = edited_text
+        cur.execute(
+            "UPDATE processed SET meta=? WHERE namespace='whatsapp_drafts' AND key=?",
+            (_json.dumps(meta, ensure_ascii=False), key),
+        )
+    return True
+
+
+@bp.route("/whatsapp")
+@_require_login
+def whatsapp_drafts():
+    """Pending WhatsApp drafts listesi."""
+    pending = _load_drafts(status_filter="pending", limit=200)
+    history = _load_drafts(status_filter="sent", limit=20)
+    dismissed = _load_drafts(status_filter="dismissed", limit=20)
+    return render_template(
+        "admin/whatsapp_drafts.html",
+        pending=pending,
+        history=history,
+        dismissed=dismissed,
+        csrf_token=_csrf_token(),
+    )
+
+
+@bp.route("/whatsapp/<path:draft_key>/send", methods=["POST"])
+@_require_login
+def whatsapp_send(draft_key: str):
+    """Doktor onayı sonrası WAHA üzerinden mesaj gönder."""
+    _validate_csrf()
+
+    edited = (request.form.get("text") or "").strip()
+    if not edited:
+        flash("Boş mesaj gönderilemez.", "error")
+        return redirect(url_for("admin_ui.whatsapp_drafts"))
+
+    # draft_key: "{sender_phone}::{timestamp_iso}"
+    if "::" not in draft_key:
+        abort(400)
+    sender = draft_key.split("::", 1)[0]
+
+    try:
+        from module3_whatsapp_communicator import send_whatsapp_message
+        send_whatsapp_message(sender, edited)
+        _update_draft_status(draft_key, "sent", edited_text=edited)
+        flash(f"Mesaj gönderildi: {sender}", "success")
+
+        # Audit log (KVKK m.12)
+        try:
+            from audit_log import get_default_audit_log
+            get_default_audit_log().record(
+                actor="admin_ui:doctor",
+                action="whatsapp_draft.sent",
+                details={
+                    "sender": sender,
+                    "draft_key": draft_key,
+                    "edited_chars": len(edited),
+                },
+            )
+        except Exception:
+            pass
+    except Exception as exc:
+        flash(f"Gönderim hatası: {exc}", "error")
+        logger.exception("whatsapp_send error")
+
+    return redirect(url_for("admin_ui.whatsapp_drafts"))
+
+
+@bp.route("/whatsapp/<path:draft_key>/dismiss", methods=["POST"])
+@_require_login
+def whatsapp_dismiss(draft_key: str):
+    """Mesajı cevapsız bırak (drafti at, gönderim yok)."""
+    _validate_csrf()
+    _update_draft_status(draft_key, "dismissed")
+
+    try:
+        from audit_log import get_default_audit_log
+        get_default_audit_log().record(
+            actor="admin_ui:doctor",
+            action="whatsapp_draft.dismissed",
+            details={"draft_key": draft_key},
+        )
+    except Exception:
+        pass
+
+    flash("Draft atıldı.", "success")
+    return redirect(url_for("admin_ui.whatsapp_drafts"))
+
+
+# ---------------------------------------------------------------------------
 # Kayıt yardımcısı
 # ---------------------------------------------------------------------------
 
