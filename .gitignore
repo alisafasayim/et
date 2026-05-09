@@ -87,3 +87,14 @@ Thumbs.db
 
 # Local Claude config
 .claude/settings.local.json
+
+# KVKK — yerel transkript, mesaj export, hasta verisi
+clinic/reports/
+clinic/samsung_extract/
+clinic/samsung_notes/
+clinic/whatsapp_qr.png
+clinic/waha_qr.png
+clinic/qr_response.json
+clinic/waha_data/
+clinic/postgres_data/
+clinic/evolution_data/
