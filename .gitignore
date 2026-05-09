@@ -98,3 +98,4 @@ clinic/qr_response.json
 clinic/waha_data/
 clinic/postgres_data/
 clinic/evolution_data/
+clinic/rag_db/
